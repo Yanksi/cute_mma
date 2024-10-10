@@ -17,7 +17,7 @@ set(CUTLASS_INCLUDE_DIRS
 
 if (DEFINED AUTOTUNE)
     foreach (dtype IN ITEMS half float)
-        file(GLOB CONFIG_DIRS "${dtype}/autotune_configs/*")
+        file(GLOB CONFIG_DIRS "autotune_configs/${dtype}/*")
         foreach(layout IN ITEMS NT TN)
             set(GROUP_NAME "${dtype}_${layout}")
             add_custom_target(${GROUP_NAME})

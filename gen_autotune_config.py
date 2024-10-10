@@ -101,7 +101,7 @@ for dtype in ["float", "half"]:
         f_tn.write(f"id,{params_tn.csvheader()}\n")
         f_nt.write(f"id,{params_nt.csvheader()}\n")
         for i, (ptn, pnt) in enumerate(zip(params_tn.configs(), params_nt.configs())):
-            cf_path = pathlib.Path(f"{dtype}/autotune_configs/config{i}/gemm_config.hpp")
+            cf_path = pathlib.Path(f"autotune_configs/{dtype}/config{i}/gemm_config.hpp")
             cf_path.parent.mkdir(parents=True, exist_ok=True)
             config_file = ConfigFile(cf_path, dtype, [ptn, pnt])
             config_file.write()
