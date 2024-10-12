@@ -97,7 +97,7 @@ class MMMConfigSpace:
 for dtype in ["float", "half"]:
     params_tn = MMMConfigSpace("ParamTN", dtype)
     params_nt = MMMConfigSpace("ParamNT", dtype)
-    with open(f"{dtype}_param_tn.csv", "w") as f_tn, open(f"{dtype}_param_nt.csv", "w") as f_nt:
+    with open(f"autotune_configs/config_csvs/{dtype}_param_tn.csv", "w") as f_tn, open(f"autotune_configs/config_csvs/{dtype}_param_nt.csv", "w") as f_nt:
         f_tn.write(f"id,{params_tn.csvheader()}\n")
         f_nt.write(f"id,{params_nt.csvheader()}\n")
         for i, (ptn, pnt) in enumerate(zip(params_tn.configs(), params_nt.configs())):

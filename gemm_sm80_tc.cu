@@ -33,6 +33,7 @@
 #include <cassert>
 #include "gemm_tc.hpp"
 #include "gemm_config.hpp"
+#include "cublas_gemm.hpp"
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -43,6 +44,8 @@
 #include <cutlass/util/print_error.hpp>
 #include <cutlass/util/GPU_Clock.hpp>
 #include <cutlass/util/helper_cuda.hpp>
+
+#include <argparse/argparse.hpp>
 
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 
@@ -239,6 +242,58 @@ void gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
+  std::string running_type = getTypeName<DTYPE>();
+  argparse::ArgumentParser program(std::string("gemm_") + running_type);
+  program.add_argument("-m", "--m")
+    .help("Number of rows in matrix A")
+    .default_value(8192)
+    .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("-n", "--n")
+    .help("Number of columns in matrix B")
+    .default_value(8192)
+    .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("-k", "--k")
+    .help("Number of columns in matrix A and rows in matrix B")
+    .default_value(4096)
+    .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("--transA")
+    .help("Transpose matrix A")
+    .default_value('T')
+    .action([](const std::string& value) { return value[0]; });
+  program.add_argument("--transB")
+    .help("Transpose matrix B")
+    .default_value('N')
+    .action([](const std::string& value) { return value[0]; });
+  program.add_argument("--timing_iterations")
+    .help("Number of iterations to time")
+    .default_value(100)
+    .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("--correctness")
+    .help("Check correctness")
+    .default_value(false)
+    .implicit_value(true);
+  program.add_argument("--cublas")
+    .help("Use cuBLAS")
+    .default_value(false)
+    .implicit_value(true);
+
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::runtime_error& err) {
+    std::cout << err.what() << std::endl;
+    std::cout << program;
+    return 1;
+  }
+
+  int m = program.get<int>("--m");
+  int n = program.get<int>("--n");
+  int k = program.get<int>("--k");
+  char transA = program.get<char>("--transA");
+  char transB = program.get<char>("--transB");
+  int timing_iterations = program.get<int>("--timing_iterations");
+  bool correctness = program.get<bool>("--correctness");
+  bool cublas = program.get<bool>("--cublas");
+  
   cudaDeviceProp props;
   cudaError_t error = cudaGetDeviceProperties(&props, 0);
   if (error != cudaSuccess) {
@@ -252,29 +307,10 @@ int main(int argc, char** argv)
     return 0;
   }
 
-  int m = 8192;
-  if (argc >= 2)
-    sscanf(argv[1], "%d", &m);
-
-  int n = 8192;
-  if (argc >= 3)
-    sscanf(argv[2], "%d", &n);
-
-  int k = 4096;
-  if (argc >= 4)
-    sscanf(argv[3], "%d", &k);
-
-  char transA = 'T';
-  if (argc >= 5)
-    sscanf(argv[4], "%c", &transA);
-
-  char transB = 'N';
-  if (argc >= 6)
-    sscanf(argv[5], "%c", &transB);
-
-  int timing_iterations = 100;
-  if (argc >= 7)
-    sscanf(argv[6], "%d", &timing_iterations);
+  #ifdef USE_CUBLAS
+  cublasHandle_t handle;
+  getCublasTensorOpHandle(&handle);
+  #endif
 
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
@@ -315,22 +351,53 @@ int main(int argc, char** argv)
     assert(false);
   }
 
-  // Run once
-  d_C = h_C;
-  gemm(transA, transB, m, n, k,
-       d_A.data().get(), ldA,
-       d_B.data().get(), ldB,
-       d_C.data().get(), ldC);
-  CUTE_CHECK_LAST();
-  thrust::host_vector<DTYPE> cute_result = d_C;
-
-  // Timing iterations
-  timer.start();
-  for (int i = 0; i < timing_iterations; ++i) {
+  std::function<void()> test_func = [&]() {
     gemm(transA, transB, m, n, k,
          d_A.data().get(), ldA,
          d_B.data().get(), ldB,
          d_C.data().get(), ldC);
+  };
+
+  #ifdef USE_CUBLAS
+  if (cublas) {
+    test_func = [&]() {
+      gemm_cublas(transA, transB, m, n, k,
+                  d_A.data().get(), ldA,
+                  d_B.data().get(), ldB,
+                  d_C.data().get(), ldC, &handle);
+      GEMM_CHECK_CUDA(cudaDeviceSynchronize());
+    };
+  }
+  #endif
+
+  // Run once
+  d_C = h_C;
+  test_func();
+  CUTE_CHECK_LAST();
+  thrust::host_vector<DTYPE> cute_result = d_C;
+
+  #ifdef USE_CUBLAS
+  if (correctness) {
+    d_C = h_C;
+    gemm_cublas(transA, transB, m, n, k,
+                d_A.data().get(), ldA,
+                d_B.data().get(), ldB,
+                d_C.data().get(), ldC, &handle);
+    thrust::host_vector<DTYPE> cublas_result = d_C;
+    double max_error = 0;
+    for (int i = 0; i < m*n; ++i) {
+      double cr = static_cast<double>(cute_result[i]);
+      double br = static_cast<double>(cublas_result[i]);
+      max_error = std::max(max_error, std::abs((cr - br) / br));
+    }
+    printf("Max error: %e\n", max_error);
+  }
+  #endif
+
+  // Timing iterations
+  timer.start();
+  for (int i = 0; i < timing_iterations; ++i) {
+    test_func();
   }
   double cute_time = timer.seconds() / timing_iterations;
   CUTE_CHECK_LAST();
