@@ -268,10 +268,6 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
-  program.add_argument("--correctness")
-    .help("Check correctness")
-    .default_value(false)
-    .implicit_value(true);
   
   #ifdef USE_CUBLAS
   program.add_argument("--cublas")
@@ -294,7 +290,6 @@ int main(int argc, char** argv)
   char transA = program.get<char>("--transA");
   char transB = program.get<char>("--transB");
   int timing_iterations = program.get<int>("--timing_iterations");
-  bool correctness = program.get<bool>("--correctness");
 
   #ifdef USE_CUBLAS
   bool cublas = program.get<bool>("--cublas");
@@ -313,11 +308,6 @@ int main(int argc, char** argv)
     return 0;
   }
 
-  #ifdef USE_CUBLAS
-  cublasHandle_t handle;
-  getCublasTensorOpHandle(&handle);
-  #endif
-
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
   std::cout << "K = " << k << std::endl;
@@ -326,7 +316,6 @@ int main(int argc, char** argv)
   thrust::host_vector<DTYPE> h_A(m*k);
   thrust::host_vector<DTYPE> h_B(n*k);
   thrust::host_vector<DTYPE> h_C(m*n);
-  double* ref_C = (correctness) ? new double[m*n] : nullptr;
 
   // initialize matrix with positive values to avoid cancellation errors
   for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<DTYPE>( (rand() / double(RAND_MAX)) );
@@ -360,19 +349,20 @@ int main(int argc, char** argv)
   }
 
   // A simple CPU reference GEMM
-  if (correctness) {
-    for (int i = 0; i < m; ++i) {
-      for (int j = 0; j < n; ++j) {
-        double sum = 0;
-        for (int l = 0; l < k; ++l) {
-          double a = (transA == 'T') ? h_A[i*ldA + l] : h_A[i + l*ldA];
-          double b = (transB == 'T') ? h_B[l*ldB + j] : h_B[l + j*ldB];
-          sum += a * b;
-        }
-        ref_C[j*n + i] = sum;
+  #ifdef DEBUG
+  double* ref_C = new double[m*n];
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double sum = 0;
+      for (int l = 0; l < k; ++l) {
+        double a = (transA == 'T') ? h_A[i*ldA + l] : h_A[i + l*ldA];
+        double b = (transB == 'T') ? h_B[l*ldB + j] : h_B[l + j*ldB];
+        sum += a * b;
       }
+      ref_C[j*n + i] = sum;
     }
   }
+  #endif
 
   std::function<void()> test_func = [&]() {
     gemm(transA, transB, m, n, k,
@@ -382,7 +372,9 @@ int main(int argc, char** argv)
   };
 
   #ifdef USE_CUBLAS
+  cublasHandle_t handle;
   if (cublas) {
+    getCublasTensorOpHandle(&handle);
     test_func = [&]() {
       gemm_cublas(transA, transB, m, n, k,
                   d_A.data().get(), ldA,
@@ -400,15 +392,15 @@ int main(int argc, char** argv)
   thrust::host_vector<DTYPE> kernel_result = d_C;
 
   #ifdef USE_CUBLAS
-  if (correctness) {
-    double max_error = 0;
-    for (int i = 0; i < m*n; ++i) {
-      double cr = static_cast<double>(kernel_result[i]);
-      double rr = ref_C[i];
-      max_error = std::max(max_error, std::abs((cr - rr) / rr));
-    }
-    printf("Max error: %e\n", max_error);
+  #ifdef DEBUG
+  double max_error = 0;
+  for (int i = 0; i < m*n; ++i) {
+    double cr = static_cast<double>(kernel_result[i]);
+    double rr = ref_C[i];
+    max_error = std::max(max_error, std::abs((cr - rr) / rr));
   }
+  printf("Max error: %e\n", max_error);
+  #endif
   #endif
 
   // Timing iterations
