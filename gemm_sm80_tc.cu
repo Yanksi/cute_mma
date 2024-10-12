@@ -328,24 +328,10 @@ int main(int argc, char** argv)
   thrust::host_vector<DTYPE> h_C(m*n);
   double* ref_C = (correctness) ? new double[m*n] : nullptr;
 
-  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<DTYPE>( 2*(rand() / double(RAND_MAX)) - 1 );
-  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<DTYPE>( 2*(rand() / double(RAND_MAX)) - 1 );
+  // initialize matrix with positive values to avoid cancellation errors
+  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<DTYPE>( (rand() / double(RAND_MAX)) );
+  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<DTYPE>( (rand() / double(RAND_MAX)) );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<DTYPE>(-1);
-
-  // A simple CPU reference GEMM
-  if (correctness) {
-    for (int i = 0; i < m; ++i) {
-      for (int j = 0; j < n; ++j) {
-        double sum = 0;
-        for (int l = 0; l < k; ++l) {
-          double a = (transA == 'T') ? h_A[i*k + l] : h_A[l*m + i];
-          double b = (transB == 'T') ? h_B[l*n + j] : h_B[j*k + l];
-          sum += a * b;
-        }
-        ref_C[j*n + i] = sum;
-      }
-    }
-  }
 
   thrust::device_vector<DTYPE> d_A = h_A;
   thrust::device_vector<DTYPE> d_B = h_B;
@@ -371,6 +357,21 @@ int main(int argc, char** argv)
     ldB = n;
   } else {
     assert(false);
+  }
+
+  // A simple CPU reference GEMM
+  if (correctness) {
+    for (int i = 0; i < m; ++i) {
+      for (int j = 0; j < n; ++j) {
+        double sum = 0;
+        for (int l = 0; l < k; ++l) {
+          double a = (transA == 'T') ? h_A[i*ldA + l] : h_A[i + l*ldA];
+          double b = (transB == 'T') ? h_B[l*ldB + j] : h_B[l + j*ldB];
+          sum += a * b;
+        }
+        ref_C[j*n + i] = sum;
+      }
+    }
   }
 
   std::function<void()> test_func = [&]() {
@@ -404,7 +405,7 @@ int main(int argc, char** argv)
     for (int i = 0; i < m*n; ++i) {
       double cr = static_cast<double>(kernel_result[i]);
       double rr = ref_C[i];
-      max_error = std::max(max_error, std::abs((cr - rr)));
+      max_error = std::max(max_error, std::abs((cr - rr) / rr));
     }
     printf("Max error: %e\n", max_error);
   }
