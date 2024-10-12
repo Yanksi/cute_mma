@@ -272,10 +272,13 @@ int main(int argc, char** argv)
     .help("Check correctness")
     .default_value(false)
     .implicit_value(true);
+  
+  #ifdef USE_CUBLAS
   program.add_argument("--cublas")
     .help("Use cuBLAS")
     .default_value(false)
     .implicit_value(true);
+  #endif
 
   try {
     program.parse_args(argc, argv);
@@ -292,7 +295,10 @@ int main(int argc, char** argv)
   char transB = program.get<char>("--transB");
   int timing_iterations = program.get<int>("--timing_iterations");
   bool correctness = program.get<bool>("--correctness");
+
+  #ifdef USE_CUBLAS
   bool cublas = program.get<bool>("--cublas");
+  #endif
   
   cudaDeviceProp props;
   cudaError_t error = cudaGetDeviceProperties(&props, 0);
@@ -320,10 +326,26 @@ int main(int argc, char** argv)
   thrust::host_vector<DTYPE> h_A(m*k);
   thrust::host_vector<DTYPE> h_B(n*k);
   thrust::host_vector<DTYPE> h_C(m*n);
+  double* ref_C = (correctness) ? new double[m*n] : nullptr;
 
   for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<DTYPE>( 2*(rand() / double(RAND_MAX)) - 1 );
   for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<DTYPE>( 2*(rand() / double(RAND_MAX)) - 1 );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<DTYPE>(-1);
+
+  // A simple CPU reference GEMM
+  if (correctness) {
+    for (int i = 0; i < m; ++i) {
+      for (int j = 0; j < n; ++j) {
+        double sum = 0;
+        for (int l = 0; l < k; ++l) {
+          double a = (transA == 'T') ? h_A[i*k + l] : h_A[l*m + i];
+          double b = (transB == 'T') ? h_B[l*n + j] : h_B[j*k + l];
+          sum += a * b;
+        }
+        ref_C[j*n + i] = sum;
+      }
+    }
+  }
 
   thrust::device_vector<DTYPE> d_A = h_A;
   thrust::device_vector<DTYPE> d_B = h_B;
@@ -374,21 +396,15 @@ int main(int argc, char** argv)
   d_C = h_C;
   test_func();
   CUTE_CHECK_LAST();
-  thrust::host_vector<DTYPE> cute_result = d_C;
+  thrust::host_vector<DTYPE> kernel_result = d_C;
 
   #ifdef USE_CUBLAS
   if (correctness) {
-    d_C = h_C;
-    gemm_cublas(transA, transB, m, n, k,
-                d_A.data().get(), ldA,
-                d_B.data().get(), ldB,
-                d_C.data().get(), ldC, &handle);
-    thrust::host_vector<DTYPE> cublas_result = d_C;
     double max_error = 0;
     for (int i = 0; i < m*n; ++i) {
-      double cr = static_cast<double>(cute_result[i]);
-      double br = static_cast<double>(cublas_result[i]);
-      max_error = std::max(max_error, std::abs((cr - br) / br));
+      double cr = static_cast<double>(kernel_result[i]);
+      double rr = ref_C[i];
+      max_error = std::max(max_error, std::abs((cr - rr)));
     }
     printf("Max error: %e\n", max_error);
   }
