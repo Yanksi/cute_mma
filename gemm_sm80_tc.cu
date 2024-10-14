@@ -197,7 +197,7 @@ void gemm_tn(int m, int n, int k,
   TiledCopy copyA = cp_layout<uint128_t, TA, true, ParamTN::block_tiling_copy>(bM, bK, size(mmaC));
   TiledCopy copyB = cp_layout<uint128_t, TA, true, ParamTN::block_tiling_copy>(bN, bK, size(mmaC));
 
-#if 0
+#if 1
   print(copyA);
   print(copyB);
   print(mmaC);
@@ -264,7 +264,7 @@ int main(int argc, char** argv)
     .help("Transpose matrix B")
     .default_value('N')
     .action([](const std::string& value) { return value[0]; });
-  program.add_argument("--timing_iterations")
+  program.add_argument("-t", "--timing_iterations")
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
@@ -348,22 +348,6 @@ int main(int argc, char** argv)
     assert(false);
   }
 
-  // A simple CPU reference GEMM
-  #ifdef DEBUG
-  double* ref_C = new double[m*n];
-  for (int i = 0; i < m; ++i) {
-    for (int j = 0; j < n; ++j) {
-      double sum = 0;
-      for (int l = 0; l < k; ++l) {
-        double a = (transA == 'T') ? h_A[i*ldA + l] : h_A[i + l*ldA];
-        double b = (transB == 'T') ? h_B[l*ldB + j] : h_B[l + j*ldB];
-        sum += a * b;
-      }
-      ref_C[j*n + i] = sum;
-    }
-  }
-  #endif
-
   std::function<void()> test_func = [&]() {
     gemm(transA, transB, m, n, k,
          d_A.data().get(), ldA,
@@ -386,13 +370,23 @@ int main(int argc, char** argv)
   #endif
 
   // Run once
+  #ifdef DEBUG
   d_C = h_C;
   test_func();
   CUTE_CHECK_LAST();
   thrust::host_vector<DTYPE> kernel_result = d_C;
-
-  #ifdef USE_CUBLAS
-  #ifdef DEBUG
+  double* ref_C = new double[m*n];
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      double sum = 0;
+      for (int l = 0; l < k; ++l) {
+        double a = (transA == 'T') ? h_A[i*ldA + l] : h_A[i + l*ldA];
+        double b = (transB == 'T') ? h_B[l*ldB + j] : h_B[l + j*ldB];
+        sum += a * b;
+      }
+      ref_C[j*n + i] = sum;
+    }
+  }
   double max_error = 0;
   for (int i = 0; i < m*n; ++i) {
     double cr = static_cast<double>(kernel_result[i]);
@@ -400,8 +394,11 @@ int main(int argc, char** argv)
     max_error = std::max(max_error, std::abs((cr - rr) / rr));
   }
   printf("Max error: %e\n", max_error);
+  
   #endif
-  #endif
+  d_C = h_C;
+  test_func(); // warmup
+  CUTE_CHECK_LAST();
 
   // Timing iterations
   timer.start();
