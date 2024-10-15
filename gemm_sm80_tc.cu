@@ -407,24 +407,25 @@ void gemm(char transA, char transB, int m, int n, int k,
      cudaStream_t stream = 0)
 {
   #ifdef LAYOUT_NT
-  if (transA == 'N' && transB == 'T') {
-    return gemm_nt(m, n, k, A, ldA, B, ldB, C, ldC, stream);
-  }
   #ifdef DEBUG
   if (transA == 'n' && transB == 't') {
     return gemm_nt_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
   #endif
-  #endif
-  #ifdef LAYOUT_TN
-  if (transA == 'T' && transB == 'N') {
-    return gemm_tn(m, n, k, A, ldA, B, ldB, C, ldC, stream);
+  if (toupper(transA) == 'N' && toupper(transB) == 'T') {
+    return gemm_nt(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
+  #endif
+  
+  #ifdef LAYOUT_TN
   #ifdef DEBUG
   if (transA == 't' && transB == 'n') {
     return gemm_tn_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
   #endif
+  if (toupper(transA) == 'T' && toupper(transB) == 'N') {
+    return gemm_tn(m, n, k, A, ldA, B, ldB, C, ldC, stream);
+  }
   #endif
   assert(false && "Not implemented");
 }
@@ -522,17 +523,17 @@ int main(int argc, char** argv)
 
   int ldA = 0, ldB = 0, ldC = m;
 
-  if (transA == 'N' || transA == 'n') {
+  if (toupper(transA) == 'N') {
     ldA = m;
-  } else if (transA == 'T' || transA == 't') {
+  } else if (toupper(transA) == 'T') {
     ldA = k;
   } else {
     assert(false);
   }
 
-  if (transB == 'N' || transB == 'n') {
+  if (toupper(transB) == 'N') {
     ldB = k;
-  } else if (transB == 'T' || transB == 't') {
+  } else if (toupper(transB) == 'T') {
     ldB = n;
   } else {
     assert(false);
