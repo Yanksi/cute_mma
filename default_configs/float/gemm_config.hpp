@@ -2,6 +2,7 @@
 #include <cute/layout.hpp>
 using namespace cute;
 #define DTYPE float
+#define IS_FLOAT 1
 namespace ParamTN {
     const static int bM = 128;
     const static int bN = 256;

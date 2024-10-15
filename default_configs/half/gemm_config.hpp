@@ -2,6 +2,7 @@
 #include <cute/layout.hpp>
 using namespace cute;
 #define DTYPE half
+#define IS_FLOAT 0
 namespace ParamTN {
     const static int bM = 256;
     const static int bN = 256;

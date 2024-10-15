@@ -14,8 +14,8 @@ void gemm_cublas(
     TA      * C, int ldC,
     cublasHandle_t* handle
 ) {
-    cublasOperation_t cuTransA = (transA == 'N') ? CUBLAS_OP_N : CUBLAS_OP_T;
-    cublasOperation_t cuTransB = (transB == 'N') ? CUBLAS_OP_N : CUBLAS_OP_T;
+    cublasOperation_t cuTransA = (transA == 'N' || transA == 'n') ? CUBLAS_OP_N : CUBLAS_OP_T;
+    cublasOperation_t cuTransB = (transB == 'N' || transB == 'n') ? CUBLAS_OP_N : CUBLAS_OP_T;
     TA alpha = 1.0;
     TA beta = 0.0;
     if constexpr (std::is_same<TA, float>::value) {
