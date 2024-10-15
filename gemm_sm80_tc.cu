@@ -241,9 +241,9 @@ void gemm_nt_test(int m, int n, int k,
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static)
-  auto bM = Int<256>{};
-  auto bN = Int<256>{};
-  auto bK = Int<16>{};
+  auto bM = Int<128>{};
+  auto bN = Int<128>{};
+  auto bK = Int< 16>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
 
@@ -256,25 +256,27 @@ void gemm_nt_test(int m, int n, int k,
 
   #if IS_FLOAT
 
-  TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F32TF32TF32F32_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
+                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
 
-  auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                           Layout<Shape<_64, _4>>{},
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
+                           Layout<Shape<_32, _8>>{},
                            Layout<Shape<_4, _1>>{});
 
-  auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                          Layout<Shape<_64, _4>>{},
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
+                          Layout<Shape<_32, _8>>{},
                           Layout<Shape<_4, _1>>{});
 
   #else
 
-  TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
+                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
 
-  auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                           Layout<Shape<_32, _8>>{},
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
+                           Layout<Shape<_16, _16>>{},
                            Layout<Shape<_8, _1>>{});
-  auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                           Layout<Shape<_32, _8>>{},
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
+                           Layout<Shape<_16, _16>>{},
                            Layout<Shape<_8, _1>>{});
   
   #endif
@@ -326,11 +328,11 @@ void gemm_tn_test(int m, int n, int k,
   // Define TN strides (mixed)
   auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
   auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
-  auto dC = make_stride(ldC, Int<1>{});                      // (dM, dN)
+  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static)
-  auto bM = Int<256>{};
-  auto bN = Int<256>{};
+  auto bM = Int<128>{};
+  auto bN = Int<128>{};
   auto bK = Int<16>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<3>{};  // Pipeline
@@ -346,23 +348,25 @@ void gemm_tn_test(int m, int n, int k,
 
   #if IS_FLOAT
 
-  TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F32TF32TF32F32_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
+                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
 
-  auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
                           make_layout(Shape<_64, _4>{}, LayoutRight{}),
                           Layout<Shape<_1, _4>>{});
-  auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
                           make_layout(Shape<_64, _4>{}, LayoutRight{}),
                           Layout<Shape<_1, _4>>{});
   
   #else
 
-  TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
+                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
 
-  auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
                           make_layout(Shape<_128, _2>{}, LayoutRight{}),
                           Layout<Shape<_1, _8>>{});
-  auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
                           make_layout(Shape<_128, _2>{}, LayoutRight{}),
                           Layout<Shape<_1, _8>>{});
   

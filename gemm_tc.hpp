@@ -298,16 +298,6 @@ gemm_device_test(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout);            // (BLK_M,BLK_K,PIPE)
   Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout);            // (BLK_N,BLK_K,PIPE)
 
-  // auto mma_k = tile_size<2>(mma);
-  // auto sA_layout_p = flatten(logical_divide(sA_layout, make_tile(_, make_layout(mma_k), _)));  // (BLK_M, mma_k, BLK_mma_K, PIPE)
-  // auto sB_layout_p = flatten(logical_divide(sB_layout, make_tile(_, make_layout(mma_k), _)));  // (BLK_N, mma_k, BLK_mma_K, PIPE)
-  // CUTE_STATIC_ASSERT_V(rank(sA_layout_p) == Int<4>{});
-  // CUTE_STATIC_ASSERT_V(rank(sB_layout_p) == Int<4>{});
-  // CUTE_STATIC_ASSERT_V(size<1>(sA_layout_p) == mma_k);
-  // CUTE_STATIC_ASSERT_V(size<1>(sB_layout_p) == mma_k);
-  // Tensor sA_p = make_tensor(make_smem_ptr(smemA), sA_layout_p);        // (BLK_M, mma_k, BLK_mma_K, PIPE)
-  // Tensor sB_p = make_tensor(make_smem_ptr(smemB), sB_layout_p);        // (BLK_N, mma_k, BLK_mma_K, PIPE)
-
   //
   // Partition the copying of A and B tiles across the threads
   //
@@ -333,9 +323,6 @@ gemm_device_test(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
   // Total count of tiles
   int k_tile_count = size<3>(tAgA);
-  if (thread0()) {
-    print("k_tile_count: "); print(k_tile_count); print("\n");
-  }
   // Current tile index in gmem to read from
   int k_tile_next = 0;
 
@@ -354,8 +341,8 @@ gemm_device_test(ProblemShape shape_MNK, CtaTiler cta_tiler,
   //
 
   ThrMMA thr_mma = mma.get_slice(threadIdx.x);
-  Tensor tCsA = thr_mma.partition_A(sA);                             // (MMA,MMA_M,MMA_K,PIPE)
-  Tensor tCsB = thr_mma.partition_B(sB);                             // (MMA,MMA_N,MMA_K,PIPE)
+  Tensor tCsA = thr_mma.partition_A(sA);                               // (MMA,MMA_M,MMA_K,PIPE)
+  Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K,PIPE)
   Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
 
   // Allocate registers for pipelining
@@ -414,48 +401,85 @@ gemm_device_test(ProblemShape shape_MNK, CtaTiler cta_tiler,
   // Current pipe index in smem to write to
   int smem_pipe_write = K_PIPE_MAX-1;
 
+  // Pipe slice
   Tensor tCsA_p = tCsA(_,_,_,smem_pipe_read);
   Tensor tCsB_p = tCsB(_,_,_,smem_pipe_read);
 
-  // Don't need the register pipeline with the use of tensor cores
-  CUTE_NO_UNROLL
-  while (k_tile_count > -(K_PIPE_MAX - 1))
-  {
-    // wait for the data to smem to be ready
-    tCsA_p = tCsA(_,_,_,smem_pipe_read);
-    tCsB_p = tCsB(_,_,_,smem_pipe_read);
+  // Size of the register pipeline
+  auto K_BLOCK_MAX = size<2>(tCrA);
 
-    // Commit the smem for smem_pipe_read
+  // PREFETCH register pipeline
+  if (K_BLOCK_MAX > 1) {
+    // Wait until our first prefetched tile is loaded in
     cp_async_wait<K_PIPE_MAX-2>();
     __syncthreads();
 
-    // Load A, B from smem to regs
-    copy(tCsA_p, tCrA);
-    copy(tCsB_p, tCrB);
-
-    // Copy gmem to smem before computing gemm on each k-pipe
-    copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
-    copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
-    cp_async_fence();
-
-    // Advance the gmem tile
-    --k_tile_count;
-    if (k_tile_count > 0) { ++k_tile_next; }
-
-    // Advance the smem pipe
-    smem_pipe_write = smem_pipe_read;
-    ++smem_pipe_read;
-    smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
-
-    gemm(mma, tCrA, tCrB, tCrC);
+    // Prefetch the first rmem from the first k-tile
+    copy(tCsA_p(_,_,Int<0>{}), tCrA(_,_,Int<0>{}));
+    copy(tCsB_p(_,_,Int<0>{}), tCrB(_,_,Int<0>{}));
   }
+
+  //
+  // PIPELINED MAIN LOOP
+  // TUTORIAL: Example of a gemm loop that pipelines shared memory using SM80's cp.async instructions
+  //           and explicit pipelines in shared memory.
+  //   Data is read from global(k_tile_next) to shared(smem_pipe_write).
+  //   Data is read from shared(smem_pipe_read) to registers(k_block_next).
+  //   Data is computed on registers(b_block).
+  //
+  //   This allows all copies and compute to overlap:
+  //     Copy from gmem->smem can overlap with copies from smem->rmem and compute on rmem.
+  //     Copy from smem->rmem can overlap with compute on rmem.
+  //
+
+  CUTE_NO_UNROLL
+  while (k_tile_count > -(K_PIPE_MAX-1))
+  {
+    CUTE_UNROLL
+    for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block)
+    {
+      if (k_block == K_BLOCK_MAX - 1)
+      {
+        // Slice the smem_pipe_read smem
+        tCsA_p = tCsA(_,_,_,smem_pipe_read);
+        tCsB_p = tCsB(_,_,_,smem_pipe_read);
+
+        // Commit the smem for smem_pipe_read
+        cp_async_wait<K_PIPE_MAX-2>();
+        __syncthreads();
+      }
+
+      // Load A, B shmem->regs for k_block+1
+      auto k_block_next = (k_block + Int<1>{}) % K_BLOCK_MAX;      // static
+      copy(tCsA_p(_,_,k_block_next), tCrA(_,_,k_block_next));
+      copy(tCsB_p(_,_,k_block_next), tCrB(_,_,k_block_next));
+      // Copy gmem to smem before computing gemm on each k-pipe
+      if (k_block == 0)
+      {
+        copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+        copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
+        cp_async_fence();
+
+        // Advance the gmem tile
+        --k_tile_count;
+        if (k_tile_count > 0) { ++k_tile_next; }
+
+        // Advance the smem pipe
+        smem_pipe_write = smem_pipe_read;
+        ++smem_pipe_read;
+        smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
+      }
+      // Thread-level register gemm for k_block
+      gemm(mma, tCrA(_,_,k_block), tCrB(_,_,k_block), tCrC);
+    }
+
+  }
+
 #endif
 
   //
   // Epilogue
   //
-
   copy(tCrC, tCgC);
-
   // axpby(alpha, tCrC, beta, tCgC);
 }
