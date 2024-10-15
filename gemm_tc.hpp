@@ -241,6 +241,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   // axpby(alpha, tCrC, beta, tCgC);
 }
 
+
+// For debugging purposes
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class TiledCopyA,
           class TB, class BStride, class BSmemLayout, class TiledCopyB,

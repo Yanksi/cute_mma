@@ -20,15 +20,14 @@ module load cuda/12.1.1 cmake/3.21.1
 cd ~/cute_mma/sgemm
 
 if $RECONFIGURE; then
-    rm -rf float
-    rm -rf half
-    python gen_autotune_config.py
-    rm -rf build
-    mkdir build
-    cd build
+    rm -rf autotune_configs
+    python autotune/gen_autotune_config.py
+    rm -rf build_autotune
+    mkdir build_autotune
+    cd build_autotune
     cmake -DAUTOTUNE=1 -DCMAKE_BUILD_TYPE=Release ..
 else
-    cd build
+    cd build_autotune
 fi
 
 make $TARGET -k -j 32 2>/dev/null

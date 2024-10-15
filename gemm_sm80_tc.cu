@@ -462,7 +462,7 @@ int main(int argc, char** argv)
   
   #ifdef USE_CUBLAS
   program.add_argument("--cublas")
-    .help("Use cuBLAS")
+    .help("Benchmark cuBLAS")
     .default_value(false)
     .implicit_value(true);
   #endif

@@ -8,4 +8,4 @@
 
 module load cuda/12.1.1 cmake/3.21.1
 cd ~/cute_mma/sgemm
-python runner.py
+python autotune/runner.py
