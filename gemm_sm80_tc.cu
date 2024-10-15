@@ -77,7 +77,7 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads total_threads) {
                           //  Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
                            Layout<Shape<Int<threads_m_size>, Int<threads_k_size>>>{});
   } else {
-    // As it not really possible to have copy width greater than bm, we can assert it
+    // As it not really possible to have copy width greater than bm, we don't need to check for that
     CUTE_STATIC_ASSERT(cp_width < bm);
     constexpr int threads_along_m = bm / cp_width;
     constexpr int threads_along_k = total_threads / threads_along_m;
