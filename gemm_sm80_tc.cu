@@ -172,7 +172,7 @@ void gemm_tn(int m, int n, int k,
   // Define TN strides (mixed)
   auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
   auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
-  auto dC = make_stride(ldC, Int<1>{});                      // (dM, dN)
+  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static)
   auto bM = Int<ParamTN::bM>{};
@@ -371,26 +371,6 @@ void gemm_tn_test(int m, int n, int k,
                           Layout<Shape<_1, _8>>{});
   
   #endif
-  // TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
-
-  // auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-  //                          make_layout(Shape<_128, _2>{}, LayoutRight{}),
-  //                          Layout<Shape<_1, _8>>{});
-  // auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-  //                          make_layout(Shape<_128, _2>{}, LayoutRight{}),
-  //                          Layout<Shape<_1, _8>>{});
-  // #else
-
-  // TiledMMA mmaC = make_tiled_mma(SM80_16x8x8_F32TF32TF32F32_TN{}, Layout<Shape<Int<2>, Int<4>>>{});  // 16x8x8 TiledMMA
-
-  // auto copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-  //                          make_layout(Shape<_64, _4>{}, LayoutRight{}),
-  //                          Layout<Shape<_1, _4>>{});
-
-  // auto copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-  //                           make_layout(Shape<_64, _4>{}, LayoutRight{}),
-  //                           Layout<Shape<_1, _4>>{});
-  // #endif
   
 
   CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
