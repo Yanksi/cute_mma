@@ -42,15 +42,15 @@ async def main():
     gpu_ids = list(range(n_gpus))
     semaphore = asyncio.Semaphore(n_gpus)
     tasks = []
-    for dtype, layout in product(["float", "half"], zip("TN", "NT")):
-        executable_root = pathlib.Path(f"build/{dtype}/{''.join(layout)}")
+    for dtype, layout in product(["float_float", "half_half"], zip("TN", "NT")):
+        executable_root = pathlib.Path(f"build_autotune/{dtype}/{''.join(layout)}")
         list_executables = get_executables(executable_root)
         curr_result = results.setdefault(dtype, {})
         for i, executable in enumerate(list_executables):
             curr_name = executable.name
             if curr_name in curr_result and layout in results[curr_name]:
                 continue
-            command = " ".join([str(executable), "8192", "8192", "4096", layout[0], layout[1]])
+            command = " ".join([str(executable), "-m 8192", "-n 8192", "-k 4096", f"--transA {layout[0]}", f"--transB {layout[1]}"])
             task = asyncio.create_task(run_command_and_postprocessing(command, postprocess, semaphore, gpu_ids))
             tasks.append((task, curr_result, curr_name, layout))
     
