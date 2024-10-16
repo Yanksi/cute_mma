@@ -1,5 +1,14 @@
 #pragma once
-#include "common.hpp"
+
+#include <cublas_v2.h>
+
+#define GEMM_CHECK_CUBLAS(call)                                                                   \
+    do {                                                                                          \
+        cublasStatus_t status = call;                                                             \
+        if (GEMM_UNLIKELY(status != CUBLAS_STATUS_SUCCESS)) {                                     \
+            throw std::runtime_error("CUBLAS call failed with status " + std::to_string(status)); \
+        }                                                                                         \
+    } while (0)
 
 void getCublasTensorOpHandle(cublasHandle_t* handle) {
     GEMM_CHECK_CUBLAS(cublasCreate(handle));

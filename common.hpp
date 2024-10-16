@@ -1,18 +1,9 @@
 #pragma once
 
 #include <cuda_fp16.h>
-#include <cublas_v2.h>
 
 #define GEMM_LIKELY(x) __builtin_expect(!!(x), 1)
 #define GEMM_UNLIKELY(x) __builtin_expect(!!(x), 0)
-
-#define GEMM_CHECK_CUBLAS(call)                                                                   \
-    do {                                                                                          \
-        cublasStatus_t status = call;                                                             \
-        if (GEMM_UNLIKELY(status != CUBLAS_STATUS_SUCCESS)) {                                     \
-            throw std::runtime_error("CUBLAS call failed with status " + std::to_string(status)); \
-        }                                                                                         \
-    } while (0)
 
 #define GEMM_CHECK_CUDA(call)                                                                   \
     do {                                                                                        \

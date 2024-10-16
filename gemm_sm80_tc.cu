@@ -33,7 +33,9 @@
 #include <cassert>
 #include "gemm_tc.hpp"
 #include <gemm_config.hpp>
+#ifdef USE_CUBLAS
 #include "cublas_gemm.hpp"
+#endif
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
