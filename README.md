@@ -7,6 +7,8 @@ The overall logic of the code closely resembles the [`sgemm_sm80`](https://githu
 The creation of those `TiledCopy`s and `TiledMMA`s are done in `gemm_sm80_tc`. `gemm_tn` and `gemm_nt` are the two versions of the `gemm` function for different layouts. The hyperparameters for these two functions would are stored in `gemm_config.hpp`. The default (currently the best) values for these hyperparameters can be found in folder `default_configs`.
 
 ## Compile
+If the [cutlass]((https://github.com/NVIDIA/cutlass/tree/main)) and [argparse](https://github.com/p-ranav/argparse) library has already been cloned in the system, set environment variables `CUTLASS_DIR` and `ARGPARSE_DIR` to the root directory of those two libraries to avoid cmake cloning the two repositories again during configuration process.
+
 The compilation of the code can be done by following
 
 ```bash
