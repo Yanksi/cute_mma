@@ -86,7 +86,7 @@ class MMMConfigSpace:
             "bm": [128, 256],
             "bn": [128, 256],
             "bk": [16, 32],
-            "bp": [2, 4],
+            "bp": [2, 3, 4],
             "block_tiling": ["true"],    #["true", "false"],
             "warp_layout": [
                 # (1,2), # 2 warps per block
