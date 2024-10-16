@@ -32,7 +32,7 @@
 #include <cstdio>
 #include <cassert>
 #include "gemm_tc.hpp"
-#include "gemm_config.hpp"
+#include <gemm_config.hpp>
 #include "cublas_gemm.hpp"
 
 #include <thrust/host_vector.h>
@@ -52,6 +52,7 @@
 template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
   typename _BM, typename _BK, typename _N_Threads>
 constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads total_threads) {
+  using namespace cute;
   constexpr int vec_width = sizeof(copy_as_t) / sizeof(ele_t);
   constexpr int total_elements = bm * bk;
   constexpr int elements_per_thread = total_elements / total_threads;
@@ -88,11 +89,11 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads total_threads) {
 }
 
 // Setup params for a NT GEMM
-template <typename TA>
+template <typename TO, typename TR>
 void gemm_nt(int m, int n, int k,
-        TA const* A, int ldA,
-        TA const* B, int ldB,
-        TA      * C, int ldC,
+        TO const* A, int ldA,
+        TO const* B, int ldB,
+        TR      * C, int ldC,
         cudaStream_t stream = 0)
 {
   using namespace cute;
@@ -108,12 +109,14 @@ void gemm_nt(int m, int n, int k,
   auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
+  using CurrParams = Params<TO, TR, CUTE_MMA_N, CUTE_MMA_T>;
+
   // Define CTA tile sizes (static)
-  auto bM = Int<ParamNT::bM>{};
-  auto bN = Int<ParamNT::bN>{};
-  auto bK = Int<ParamNT::bK>{};
+  auto bM = Int<CurrParams::bM>{};
+  auto bN = Int<CurrParams::bN>{};
+  auto bK = Int<CurrParams::bK>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<ParamNT::bP>{};  // Pipeline
+  auto bP = Int<CurrParams::bP>{};  // Pipeline
 
   // Define the smem layouts (static)
   auto sA = make_layout(make_shape(bM, bK, bP));             // (m,k,p) -> smem_idx; m-major
@@ -122,13 +125,13 @@ void gemm_nt(int m, int n, int k,
 
   // Define the thread layouts (static)
 
-  TiledMMA mmaC = make_tiled_mma(ParamNT::mma_atom{}, ParamNT::warp_layout{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
   CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
 
-  TiledCopy copyA = cp_layout<uint128_t, TA, false, ParamNT::block_tiling_copy>(bM, bK, size(mmaC));
-  TiledCopy copyB = cp_layout<uint128_t, TA, false, ParamNT::block_tiling_copy>(bN, bK, size(mmaC));
+  TiledCopy copyA = cp_layout<uint128_t, TO, false, CurrParams::block_tiling_copy>(bM, bK, size(mmaC));
+  TiledCopy copyB = cp_layout<uint128_t, TO, false, CurrParams::block_tiling_copy>(bN, bK, size(mmaC));
   
 
 #if 0
@@ -154,11 +157,11 @@ void gemm_nt(int m, int n, int k,
 }
 
 // // Setup params for a TN GEMM, K-Major inputs
-template <typename TA>
+template <typename TO, typename TR>
 void gemm_tn(int m, int n, int k,
-        TA const* A, int ldA,
-        TA const* B, int ldB,
-        TA      * C, int ldC,
+        TO const* A, int ldA,
+        TO const* B, int ldB,
+        TR      * C, int ldC,
         cudaStream_t stream = 0)
 {
   using namespace cute;
@@ -174,12 +177,14 @@ void gemm_tn(int m, int n, int k,
   auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
+  using CurrParams = Params<TO, TR, CUTE_MMA_T, CUTE_MMA_N>;
+
   // Define CTA tile sizes (static)
-  auto bM = Int<ParamTN::bM>{};
-  auto bN = Int<ParamTN::bN>{};
-  auto bK = Int<ParamTN::bK>{};
+  auto bM = Int<CurrParams::bM>{};
+  auto bN = Int<CurrParams::bN>{};
+  auto bK = Int<CurrParams::bK>{};
   auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<ParamTN::bP>{};  // Pipeline
+  auto bP = Int<CurrParams::bP>{};  // Pipeline
 
   // Define the smem layouts (static)
   auto sA_atom = make_layout(make_shape (bM, bK), LayoutRight{}); // (m,k) -> smem_idx; padded k-major
@@ -189,13 +194,13 @@ void gemm_tn(int m, int n, int k,
   auto sC = make_layout(make_shape(bM, bN));                        // (m,n) -> smem_idx
 
   
-  TiledMMA mmaC = make_tiled_mma(ParamTN::mma_atom{}, ParamTN::warp_layout{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
   CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
   
-  TiledCopy copyA = cp_layout<uint128_t, TA, true, ParamTN::block_tiling_copy>(bM, bK, size(mmaC));
-  TiledCopy copyB = cp_layout<uint128_t, TA, true, ParamTN::block_tiling_copy>(bN, bK, size(mmaC));
+  TiledCopy copyA = cp_layout<uint128_t, TO, true, CurrParams::block_tiling_copy>(bM, bK, size(mmaC));
+  TiledCopy copyB = cp_layout<uint128_t, TO, true, CurrParams::block_tiling_copy>(bN, bK, size(mmaC));
 
 #if 0
   print(copyA);
@@ -219,210 +224,20 @@ void gemm_tn(int m, int n, int k,
        C, dC, sC, mmaC);
 }
 
-// Setup params for a NT GEMM
-template <typename TA>
-void gemm_nt_test(int m, int n, int k,
-        TA const* A, int ldA,
-        TA const* B, int ldB,
-        TA      * C, int ldC,
-        cudaStream_t stream = 0)
-{
-  using namespace cute;
-
-  // Define shapes (dynamic)
-  auto M = int(m);
-  auto N = int(n);
-  auto K = int(k);
-  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
-
-  // Define NT strides (mixed)
-  auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK)
-  auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
-  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
-
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int< 16>{};
-  auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<3>{};  // Pipeline
-
-  // Define the smem layouts (static)
-  auto sA = make_layout(make_shape(bM, bK, bP));             // (m,k,p) -> smem_idx; m-major
-  auto sB = make_layout(make_shape(bN, bK, bP));             // (n,k,p) -> smem_idx; n-major
-  auto sC = make_layout(make_shape(bM, bN));                 // (m,n) -> smem_idx; m-major
-
-  // Define the thread layouts (static)
-
-  #if IS_FLOAT
-
-  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
-                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
-
-  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                           Layout<Shape<_32, _8>>{},
-                           Layout<Shape<_4, _1>>{});
-
-  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                          Layout<Shape<_32, _8>>{},
-                          Layout<Shape<_4, _1>>{});
-
-  #else
-
-  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
-                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
-
-  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                           Layout<Shape<_16, _16>>{},
-                           Layout<Shape<_8, _1>>{});
-  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                           Layout<Shape<_16, _16>>{},
-                           Layout<Shape<_8, _1>>{});
-  
-  #endif
-  
-
-  CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
-  CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
-  CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
-  
-
-#if 0
-  print(copyA);
-  print(copyB);
-  print(mmaC);
-#endif
-
-#if 0
-  print_latex(copyA);
-  print_latex(copyB);
-  print_latex(mmaC);
-#endif
-
-  dim3 dimBlock(size(mmaC));
-  dim3 dimGrid(size(ceil_div(M, bM)),
-               size(ceil_div(N, bN)));
-  gemm_device_test<<<dimGrid, dimBlock, 0, stream>>>
-      (prob_shape, cta_tiler,
-       A, dA, sA, copyA,
-       B, dB, sB, copyB,
-       C, dC, sC, mmaC);
-}
-
-// // Setup params for a TN GEMM, K-Major inputs
-template <typename TA>
-void gemm_tn_test(int m, int n, int k,
-        TA const* A, int ldA,
-        TA const* B, int ldB,
-        TA      * C, int ldC,
-        cudaStream_t stream = 0)
-{
-  using namespace cute;
-
-  // Define shapes (dynamic)
-  auto M = int(m);
-  auto N = int(n);
-  auto K = int(k);
-  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
-
-  // Define TN strides (mixed)
-  auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
-  auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
-  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
-
-  // Define CTA tile sizes (static)
-  auto bM = Int<128>{};
-  auto bN = Int<128>{};
-  auto bK = Int<16>{};
-  auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
-  auto bP = Int<3>{};  // Pipeline
-
-  // Define the smem layouts (static)
-  auto sA_atom = make_layout(make_shape (bM, bK), LayoutRight{}); // (m,k) -> smem_idx; padded k-major
-  auto sB_atom = make_layout(make_shape (bN, bK), LayoutRight{}); // (n,k) -> smem_idx; padded k-major
-  auto sA = tile_to_shape(sA_atom, make_shape(bM, bK, bP));
-  auto sB = tile_to_shape(sB_atom, make_shape(bN, bK, bP));
-  auto sC = make_layout(make_shape(bM, bN));                        // (m,n) -> smem_idx
-
-  // Define the thread layouts (static)
-
-  #if IS_FLOAT
-
-  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
-                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
-
-  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                          make_layout(Shape<_64, _4>{}, LayoutRight{}),
-                          Layout<Shape<_1, _4>>{});
-  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, float>{},
-                          make_layout(Shape<_64, _4>{}, LayoutRight{}),
-                          Layout<Shape<_1, _4>>{});
-  
-  #else
-
-  TiledMMA mmaC = make_tiled_mma(UniversalFMA<TA,TA,TA>{},
-                                 Layout<Shape<_16,_16,_1>>{});  // 16x16x1 TiledMMA
-
-  TiledCopy copyA = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                          make_layout(Shape<_128, _2>{}, LayoutRight{}),
-                          Layout<Shape<_1, _8>>{});
-  TiledCopy copyB = make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half>{},
-                          make_layout(Shape<_128, _2>{}, LayoutRight{}),
-                          Layout<Shape<_1, _8>>{});
-  
-  #endif
-  
-
-  CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
-  CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
-  CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
-
-#if 0
-  print(copyA);
-  print(copyB);
-  print(mmaC);
-#endif
-
-#if 0
-  print_latex(copyA);
-  print_latex(copyB);
-  print_latex(mmaC);
-#endif
-
-  dim3 dimBlock(size(mmaC));
-  dim3 dimGrid(size(ceil_div(M, bM)),
-               size(ceil_div(N, bN)));
-  gemm_device_test<<<dimGrid, dimBlock, 0, stream>>>
-      (prob_shape, cta_tiler,
-       A, dA, sA, copyA,
-       B, dB, sB, copyB,
-       C, dC, sC, mmaC);
-}
-
-template <typename TA>
+template <typename TO, typename TR>
 void gemm(char transA, char transB, int m, int n, int k,
-     TA const* A, int ldA,
-     TA const* B, int ldB,
-     TA      * C, int ldC,
+     TO const* A, int ldA,
+     TO const* B, int ldB,
+     TR      * C, int ldC,
      cudaStream_t stream = 0)
 {
   #ifdef LAYOUT_NT
-  #ifdef DEBUG
-  if (transA == 'n' && transB == 't') {
-    return gemm_nt_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
-  }
-  #endif
   if (toupper(transA) == 'N' && toupper(transB) == 'T') {
     return gemm_nt(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
   #endif
   
   #ifdef LAYOUT_TN
-  #ifdef DEBUG
-  if (transA == 't' && transB == 'n') {
-    return gemm_tn_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
-  }
-  #endif
   if (toupper(transA) == 'T' && toupper(transB) == 'N') {
     return gemm_tn(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
@@ -433,8 +248,9 @@ void gemm(char transA, char transB, int m, int n, int k,
 
 int main(int argc, char** argv)
 {
-  std::string running_type = getTypeName<DTYPE>();
-  argparse::ArgumentParser program(std::string("gemm_") + running_type);
+  std::string running_type_o = getTypeName<CUTE_MMA_DTYPE_O>();
+  std::string running_type_r = getTypeName<CUTE_MMA_DTYPE_R>();
+  argparse::ArgumentParser program(std::string("gemm_") + running_type_o + "_" + running_type_r);
   program.add_argument("-m", "--m")
     .help("Number of rows in matrix A")
     .default_value(8192)
@@ -504,18 +320,18 @@ int main(int argc, char** argv)
   std::cout << "K = " << k << std::endl;
   std::cout << "C = A^" << transA << " B^" << transB << std::endl;
 
-  thrust::host_vector<DTYPE> h_A(m*k);
-  thrust::host_vector<DTYPE> h_B(n*k);
-  thrust::host_vector<DTYPE> h_C(m*n);
+  thrust::host_vector<CUTE_MMA_DTYPE_O> h_A(m*k);
+  thrust::host_vector<CUTE_MMA_DTYPE_O> h_B(n*k);
+  thrust::host_vector<CUTE_MMA_DTYPE_R> h_C(m*n);
 
   // initialize matrix with positive values to avoid cancellation errors
-  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<DTYPE>( (rand() / double(RAND_MAX)) );
-  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<DTYPE>( (rand() / double(RAND_MAX)) );
-  for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<DTYPE>(-1);
+  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<CUTE_MMA_DTYPE_O>( (rand() / double(RAND_MAX)) );
+  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<CUTE_MMA_DTYPE_O>( (rand() / double(RAND_MAX)) );
+  for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<CUTE_MMA_DTYPE_R>(-1);
 
-  thrust::device_vector<DTYPE> d_A = h_A;
-  thrust::device_vector<DTYPE> d_B = h_B;
-  thrust::device_vector<DTYPE> d_C = h_C;
+  thrust::device_vector<CUTE_MMA_DTYPE_O> d_A = h_A;
+  thrust::device_vector<CUTE_MMA_DTYPE_O> d_B = h_B;
+  thrust::device_vector<CUTE_MMA_DTYPE_R> d_C = h_C;
 
   double gflops = (2.0*m*n*k) * 1e-9;
 
@@ -565,7 +381,7 @@ int main(int argc, char** argv)
   d_C = h_C;
   test_func();
   CUTE_CHECK_LAST();
-  thrust::host_vector<DTYPE> kernel_result = d_C;
+  thrust::host_vector<CUTE_MMA_DTYPE_R> kernel_result = d_C;
   double* ref_C = new double[m*n];
   for (int i = 0; i < m; ++i) {
     for (int j = 0; j < n; ++j) {
