@@ -60,6 +60,9 @@ set(COMMON_INCLUDE_DIRS
     ${ARGPARSE_DIR}/include
 )
 
+add_executable(playground cute_playground.cu)
+target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
+
 set(dtypes_o half float)
 set(dtypes_r half float)
 
