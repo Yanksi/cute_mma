@@ -16,6 +16,7 @@ namespace cute {
         static const bool block_tiling_copy = true;
         using warp_layout = Layout<Shape<Int<2>, Int<4>>>;
         using mma_atom = SM80_16x8x4_F32TF32TF32F32_TN;
+        using s2r_atom = Copy_Atom<AutoVectorizingCopy, float>;
     };
 
     template <>
@@ -27,6 +28,7 @@ namespace cute {
         static const bool block_tiling_copy = true;
         using warp_layout = Layout<Shape<Int<2>, Int<2>>>;
         using mma_atom = SM80_16x8x8_F32TF32TF32F32_TN;
+        using s2r_atom = Copy_Atom<AutoVectorizingCopy, float>;
     };
 
     template <>
@@ -38,6 +40,7 @@ namespace cute {
         static const bool block_tiling_copy = true;
         using warp_layout = Layout<Shape<Int<4>, Int<2>>>;
         using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
+        using s2r_atom = Copy_Atom<SM75_U32x1_LDSM_N, half_t>;
     };
 
     template <>
@@ -49,5 +52,6 @@ namespace cute {
         static const bool block_tiling_copy = true;
         using warp_layout = Layout<Shape<Int<1>, Int<4>>>;
         using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
+        using s2r_atom = Copy_Atom<AutoVectorizingCopy, half_t>;
     };
 }

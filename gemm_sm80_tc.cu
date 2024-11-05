@@ -90,6 +90,7 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads total_threads) {
   }
 }
 
+
 // Setup params for a NT GEMM
 template <typename TO, typename TR>
 void gemm_nt(int m, int n, int k,
@@ -226,6 +227,151 @@ void gemm_tn(int m, int n, int k,
        C, dC, sC, mmaC);
 }
 
+// Setup params for a NT GEMM
+template <typename TO, typename TR>
+void gemm_nt_test(int m, int n, int k,
+        TO const* A, int ldA,
+        TO const* B, int ldB,
+        TR      * C, int ldC,
+        cudaStream_t stream = 0)
+{
+  using namespace cute;
+
+  // Define shapes (dynamic)
+  auto M = int(m);
+  auto N = int(n);
+  auto K = int(k);
+  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
+
+  // Define NT strides (mixed)
+  auto dA = make_stride(Int<1>{}, ldA);                      // (dM, dK)
+  auto dB = make_stride(Int<1>{}, ldB);                      // (dN, dK)
+  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
+
+  using CurrParams = Params<TO, TR, CUTE_MMA_N, CUTE_MMA_T>;
+
+  // Define CTA tile sizes (static)
+  auto bM = Int<CurrParams::bM>{};
+  auto bN = Int<CurrParams::bN>{};
+  auto bK = Int<CurrParams::bK>{};
+  auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
+  auto bP = Int<CurrParams::bP>{};  // Pipeline
+
+  // Define the smem layouts (static)
+  auto sA = make_layout(make_shape(bM, bK, bP));             // (m,k,p) -> smem_idx; m-major
+  auto sB = make_layout(make_shape(bN, bK, bP));             // (n,k,p) -> smem_idx; n-major
+  auto sC = make_layout(make_shape(bM, bN));                 // (m,n) -> smem_idx; m-major
+
+  // Define the thread layouts (static)
+
+  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
+  CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
+  CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
+  CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
+
+  TiledCopy copyA = cp_layout<uint128_t, TO, false, CurrParams::block_tiling_copy>(bM, bK, size(mmaC));
+  TiledCopy copyB = cp_layout<uint128_t, TO, false, CurrParams::block_tiling_copy>(bN, bK, size(mmaC));
+
+  auto s2r_A = typename CurrParams::s2r_atom{};
+  auto s2r_B = typename CurrParams::s2r_atom{};
+  
+
+#if 0
+  print(copyA);
+  print(copyB);
+  print(mmaC);
+#endif
+
+#if 0
+  print_latex(copyA);
+  print_latex(copyB);
+  print_latex(mmaC);
+#endif
+
+  dim3 dimBlock(size(mmaC));
+  dim3 dimGrid(size(ceil_div(M, bM)),
+               size(ceil_div(N, bN)));
+  gemm_device_test<<<dimGrid, dimBlock, 0, stream>>>
+      (prob_shape, cta_tiler,
+       A, dA, sA, copyA, s2r_A,
+       B, dB, sB, copyB, s2r_B,
+       C, dC, sC, mmaC);
+}
+
+// // Setup params for a TN GEMM, K-Major inputs
+template <typename TO, typename TR>
+void gemm_tn_test(int m, int n, int k,
+        TO const* A, int ldA,
+        TO const* B, int ldB,
+        TR      * C, int ldC,
+        cudaStream_t stream = 0)
+{
+  using namespace cute;
+
+  // Define shapes (dynamic)
+  auto M = int(m);
+  auto N = int(n);
+  auto K = int(k);
+  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
+
+  // Define TN strides (mixed)
+  auto dA = make_stride(ldA, Int<1>{});                      // (dM, dK)
+  auto dB = make_stride(ldB, Int<1>{});                      // (dN, dK)
+  auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
+
+  using CurrParams = Params<TO, TR, CUTE_MMA_T, CUTE_MMA_N>;
+
+  // Define CTA tile sizes (static)
+  auto bM = Int<CurrParams::bM>{};
+  auto bN = Int<CurrParams::bN>{};
+  auto bK = Int<CurrParams::bK>{};
+  auto cta_tiler = make_shape(bM, bN, bK);                   // (BLK_M, BLK_N, BLK_K)
+  auto bP = Int<CurrParams::bP>{};  // Pipeline
+
+  // Define the smem layouts (static)
+  auto swizzle_atom = composition(Swizzle<3,3,3>{},
+                                  Layout<Shape <_8,Shape <_8, _1>>,
+                                         Stride<_8,Stride<_1,_64>>>{});
+  // auto sA_atom = make_layout(make_shape (bM, bK), LayoutRight{}); // (m,k) -> smem_idx; padded k-major
+  // auto sB_atom = make_layout(make_shape (bN, bK), LayoutRight{}); // (n,k) -> smem_idx; padded k-major
+  auto sA = tile_to_shape(swizzle_atom, make_shape(bM, bK, bP));
+  auto sB = tile_to_shape(swizzle_atom, make_shape(bN, bK, bP));
+  auto sC = make_layout(make_shape(bM, bN));                        // (m,n) -> smem_idx
+
+  
+  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
+  CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
+  CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
+  CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
+  
+  TiledCopy copyA = cp_layout<uint128_t, TO, true, CurrParams::block_tiling_copy>(bM, bK, size(mmaC));
+  TiledCopy copyB = cp_layout<uint128_t, TO, true, CurrParams::block_tiling_copy>(bN, bK, size(mmaC));
+
+  auto s2r_A = typename CurrParams::s2r_atom{};
+  auto s2r_B = typename CurrParams::s2r_atom{};
+
+#if 0
+  print(copyA);
+  print(copyB);
+  print(mmaC);
+#endif
+
+#if 0
+  print_latex(copyA);
+  print_latex(copyB);
+  print_latex(mmaC);
+#endif
+
+  dim3 dimBlock(size(mmaC));
+  dim3 dimGrid(size(ceil_div(M, bM)),
+               size(ceil_div(N, bN)));
+  gemm_device_test<<<dimGrid, dimBlock, 0, stream>>>
+      (prob_shape, cta_tiler,
+       A, dA, sA, copyA, s2r_A,
+       B, dB, sB, copyB, s2r_B,
+       C, dC, sC, mmaC);
+}
+
 template <typename TO, typename TR>
 void gemm(char transA, char transB, int m, int n, int k,
      TO const* A, int ldA,
@@ -234,14 +380,20 @@ void gemm(char transA, char transB, int m, int n, int k,
      cudaStream_t stream = 0)
 {
   #ifdef LAYOUT_NT
-  if (toupper(transA) == 'N' && toupper(transB) == 'T') {
+  if (transA == 'N' && transB == 'T') {
     return gemm_nt(m, n, k, A, ldA, B, ldB, C, ldC, stream);
+  }
+  if (transA == 'n' && transB == 't') {
+    return gemm_nt_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
   #endif
   
   #ifdef LAYOUT_TN
-  if (toupper(transA) == 'T' && toupper(transB) == 'N') {
+  if (transA == 'T' && transB == 'N') {
     return gemm_tn(m, n, k, A, ldA, B, ldB, C, ldC, stream);
+  }
+  if (transA == 't' && transB == 'n') {
+    return gemm_tn_test(m, n, k, A, ldA, B, ldB, C, ldC, stream);
   }
   #endif
   assert(false && "Not implemented");
