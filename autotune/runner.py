@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 import pickle
 import asyncio
+import argparse
 
 
 async def run_command_and_postprocessing(command, postprocess=lambda out, err: None, semaphore=None, avai_gpus=[0]):
@@ -32,7 +33,7 @@ def get_executables(root_path):
             executables.append(path)
     return executables
 
-async def main():
+async def main(target_dtype, target_layout):
     results = {}
     if os.path.exists("results.pkl"):
         with open("results.pkl", "rb") as f:
@@ -42,13 +43,19 @@ async def main():
     gpu_ids = list(range(n_gpus))
     semaphore = asyncio.Semaphore(n_gpus)
     tasks = []
-    for dtype, layout in product(["float_float", "half_half"], zip("TN", "NT")):
-        executable_root = pathlib.Path(f"build_autotune/{dtype}/{''.join(layout)}")
+    dtypes = [target_dtype]
+    if target_dtype == "all":
+        dtypes = ["float_float", "half_half"]
+    layouts = [target_layout]
+    if target_layout == "all":
+        layouts = ["TN", "NT"]
+    for dtype, layout in product(dtypes, layouts):
+        executable_root = pathlib.Path(f"build_autotune/{dtype}/{layout}")
         list_executables = get_executables(executable_root)
         curr_result = results.setdefault(dtype, {})
         for i, executable in enumerate(list_executables):
             curr_name = executable.name
-            if curr_name in curr_result and layout in results[curr_name]:
+            if curr_name in curr_result and layout in curr_result[curr_name]:
                 continue
             command = " ".join([str(executable), "-m 8192", "-n 8192", "-k 4096", f"--transA {layout[0]}", f"--transB {layout[1]}"])
             task = asyncio.create_task(run_command_and_postprocessing(command, postprocess, semaphore, gpu_ids))
@@ -70,4 +77,10 @@ async def main():
         pickle.dump(results, f)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--dtype", type=str, default="half_half")
+    argparser.add_argument("--layout", type=str, default="TN")
+    args = argparser.parse_args()
+    target_dtype = args.dtype
+    target_layout = args.layout
+    asyncio.run(main(target_dtype, target_layout))

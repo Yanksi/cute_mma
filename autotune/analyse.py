@@ -4,13 +4,14 @@ import pandas as pd
 # Load the results
 with open("results.pkl", "rb") as f:
     all_results = pickle.load(f)
+    # print(all_results)
 
 for dtype in all_results:
     print(f"\nResults for {dtype}")
     results = all_results[dtype]
     result_table = []
     for k, v in results.items():
-        result_table.append((k, v.get(("T", "N"), float('nan')), v.get(("N", "T"), float('nan'))))
+        result_table.append((k, v.get(("TN"), float('nan')), v.get(("NT"), float('nan'))))
 
     result_table = pd.DataFrame(result_table, columns=["name", "TN", "NT"])
 

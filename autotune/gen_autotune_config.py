@@ -5,8 +5,8 @@ import pathlib
 
 class ConfigParams:
     config_format = textwrap.dedent("""
-    template<CUTE_MMA_Layout ALayout, CUTE_MMA_Layout BLayout>
-    struct Params <{dtypeo}, {dtyper}, ALayout, BLayout> {{
+    template<>
+    struct Params <{dtypeo}, {dtyper}, CUTE_MMA_{Alayout}, CUTE_MMA_{Blayout}> {{
         const static int bM = {bm};
         const static int bN = {bn};
         const static int bK = {bk};
@@ -14,17 +14,22 @@ class ConfigParams:
         const static bool block_tiling_copy = {block_tiling};
         using warp_layout = Layout<Shape<Int<{warp_layout[0]}>, Int<{warp_layout[1]}>>>;
         using mma_atom = {mma_atom};
+        using s2r_atom = {s2r_atom};
     }};
     """)
     def __init__(self, *,
-                 dtypeo="float", dtyper="float",
+                 dtypeo="half", dtyper="half",
+                 Alayout="T", Blayout="N",
                  bm=128, bn=128,
                  bk=16, bp=4,
                  block_tiling="true",
                  warp_layout=(2,4),
-                 mma_atom="SM80_16x8x8_F16F16F16F16_TN"):
+                 mma_atom="SM80_16x8x8_F16F16F16F16_TN",
+                 s2r_atom="Copy_Atom<AutoVectorizingCopy, half>"):
         self.dtypeo = dtypeo
         self.dtyper = dtyper
+        self.Alayout = Alayout
+        self.Blayout = Blayout
         self.bm = bm
         self.bn = bn
         self.bk = bk
@@ -32,6 +37,7 @@ class ConfigParams:
         self.block_tiling = block_tiling
         self.warp_layout = warp_layout
         self.mma_atom = mma_atom
+        self.s2r_atom = s2r_atom
     
     def __str__(self):
         return self.config_format.format(**self.__dict__)
@@ -77,16 +83,46 @@ MMA_ATOMS = {
     ]
 }
 
+S2R_ATOMS = {
+    ("float", "float") : {
+        ("T", "N"): [
+            "Copy_Atom<SM75_U32x4_LDSM_N, half_t>",
+            "Copy_Atom<SM75_U32x2_LDSM_N, half_t>",
+            "Copy_Atom<SM75_U32x1_LDSM_N, half_t>",
+            "Copy_Atom<AutoVectorizingCopy, float>"
+        ],
+        ("N", "T"): [
+            "Copy_Atom<AutoVectorizingCopy, float>"
+        ],
+    },
+    ("half", "half") : {
+        ("T", "N"): [
+            "Copy_Atom<SM75_U32x4_LDSM_N, half_t>",
+            "Copy_Atom<SM75_U32x2_LDSM_N, half_t>",
+            "Copy_Atom<SM75_U32x1_LDSM_N, half_t>",
+            "Copy_Atom<AutoVectorizingCopy, half>"
+        ],
+        ("N", "T"): [
+            "Copy_Atom<SM75_U16x8_LDSM_T, half_t>",
+            "Copy_Atom<SM75_U16x4_LDSM_T, half_t>",
+            "Copy_Atom<SM75_U16x2_LDSM_T, half_t>",
+            "Copy_Atom<AutoVectorizingCopy, half>"
+        ],
+    },
+}
+
 class MMMConfigSpace:
-    def __init__(self, dtypeo, dtyper):
+    def __init__(self, dtypeo, dtyper, Alayout, Blayout):
         self.dtypeo = dtypeo
         self.dtyper = dtyper
+        self.Alayout = Alayout
+        self.Blayout = Blayout
         self.generated_configs = []
         self.params = {
             "bm": [128, 256],
             "bn": [128, 256],
             "bk": [16, 32],
-            "bp": [2, 3, 4],
+            "bp": [2, 3],
             "block_tiling": ["true"],    #["true", "false"],
             "warp_layout": [
                 # (1,2), # 2 warps per block
@@ -99,7 +135,8 @@ class MMMConfigSpace:
                 (4,2),
                 (2,4),
             ],
-            "mma_atom": MMA_ATOMS[(dtypeo, dtyper)]
+            "mma_atom": MMA_ATOMS[(dtypeo, dtyper)],
+            "s2r_atom": S2R_ATOMS[(dtypeo, dtyper)][(Alayout, Blayout)]
         }
     
     def getcsv(self):
@@ -117,20 +154,23 @@ class MMMConfigSpace:
             yield ConfigParams(
                 dtypeo=self.dtypeo,
                 dtyper=self.dtyper,
+                Alayout=self.Alayout,
+                Blayout=self.Blayout,
                 **params)
 
 for dtypeo, dtyper in [("float", "float"), ("half", "half")]:
-    params = MMMConfigSpace(dtypeo, dtyper)
-    csv_folder = pathlib.Path("autotune_configs/config_csvs")
-    csv_folder.mkdir(parents=True, exist_ok=True)
-    
-    for i, p in enumerate(params.configs()):
-        cf_path = pathlib.Path(f"autotune_configs/{dtypeo}_{dtyper}/config{i}/gemm_config.hpp")
-        cf_path.parent.mkdir(parents=True, exist_ok=True)
-        config_file = ConfigFile(cf_path, [p])
-        config_file.write()
-    
-    with open(f"autotune_configs/config_csvs/{dtypeo}_{dtyper}_param.csv", "w") as f:
-        f.write(params.getcsv())
+    for Alayout, Blayout in [("T", "N"), ("N", "T")]:
+        params = MMMConfigSpace(dtypeo, dtyper, Alayout, Blayout)
+        csv_folder = pathlib.Path("autotune_configs/config_csvs")
+        csv_folder.mkdir(parents=True, exist_ok=True)
+        
+        for i, p in enumerate(params.configs()):
+            cf_path = pathlib.Path(f"autotune_configs/{dtypeo}_{dtyper}/{Alayout}{Blayout}/config{i}/gemm_config.hpp")
+            cf_path.parent.mkdir(parents=True, exist_ok=True)
+            config_file = ConfigFile(cf_path, [p])
+            config_file.write()
+        
+        with open(f"autotune_configs/config_csvs/{dtypeo}_{dtyper}_{Alayout}{Blayout}_param.csv", "w") as f:
+            f.write(params.getcsv())
 
          
