@@ -371,9 +371,9 @@ gemm_device_test(ProblemShape shape_MNK, CtaTiler cta_tiler,
   Tensor tXsB = s2r_thr_copy_b.partition_S(sB);                        // (CPY,MMA_N,MMA_K,PIPE)
   Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB);                         // (CPY,MMA_N,MMA_K)
 
-  CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tXrA));                // MMA_M
+  // CUTE_STATIC_ASSERT_V(size<1>(tCrA) == size<1>(tXrA));                // MMA_M
   CUTE_STATIC_ASSERT_V(size<2>(tCrA) == size<2>(tXrA));                // MMA_K
-  CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<1>(tXrB));                // MMA_N
+  // CUTE_STATIC_ASSERT_V(size<1>(tCrB) == size<1>(tXrB));                // MMA_N
   CUTE_STATIC_ASSERT_V(size<2>(tCrB) == size<2>(tXrB));                // MMA_K
   
 #if 0

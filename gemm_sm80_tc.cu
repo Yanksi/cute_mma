@@ -264,7 +264,10 @@ void gemm_nt_test(int m, int n, int k,
 
   // Define the thread layouts (static)
 
-  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(
+                    typename CurrParams::mma_atom{},
+                    typename CurrParams::warp_layout{},
+                    Tile<decltype(bM), decltype(bN)>{});  // 16x8x8 TiledMMA
   CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
@@ -339,7 +342,10 @@ void gemm_tn_test(int m, int n, int k,
   auto sC = make_layout(make_shape(bM, bN));                        // (m,n) -> smem_idx
 
   
-  TiledMMA mmaC = make_tiled_mma(typename CurrParams::mma_atom{}, typename CurrParams::warp_layout{});  // 16x8x8 TiledMMA
+  TiledMMA mmaC = make_tiled_mma(
+                    typename CurrParams::mma_atom{},
+                    typename CurrParams::warp_layout{},
+                    Tile<decltype(bM), decltype(bN)>{});  // 16x8x8 TiledMMA
   CUTE_STATIC_ASSERT(bM % tile_size<0>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bN % tile_size<1>(mmaC) == 0);
   CUTE_STATIC_ASSERT(bK % tile_size<2>(mmaC) == 0);
