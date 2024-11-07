@@ -332,13 +332,25 @@ void gemm_tn_test(int m, int n, int k,
   auto bP = Int<CurrParams::bP>{};  // Pipeline
 
   // Define the smem layouts (static)
-  auto swizzle_atom = composition(Swizzle<3,3,3>{},
-                                  Layout<Shape <_8,Shape <_8, _1>>,
-                                         Stride<_8,Stride<_1,_64>>>{});
+  // auto swizzle_atom = composition(Swizzle<3,3,3>{},
+  //                                 Layout<Shape <_8,Shape <_8, _1>>,
+  //                                        Stride<_8,Stride<_1,_64>>>{});
+  // auto sA_atom = make_layout(
+  //   make_shape(bM, bK),
+  //   make_stride(bK + Int<paddingSize<TO>()>{}, _1{})
+  // );
+  // auto sB_atom = make_layout(
+  //   make_shape(bN, bK),
+  //   make_stride(bK + Int<paddingSize<TO>()>{}, _1{})
+  // );
+  auto smem_atom = make_layout(
+    make_shape(_1{}, bK),
+    make_stride(bK + Int<paddingSize<TO>()>{}, _1{})
+  );
   // auto sA_atom = make_layout(make_shape (bM, bK), LayoutRight{}); // (m,k) -> smem_idx; padded k-major
   // auto sB_atom = make_layout(make_shape (bN, bK), LayoutRight{}); // (n,k) -> smem_idx; padded k-major
-  auto sA = tile_to_shape(swizzle_atom, make_shape(bM, bK, bP));
-  auto sB = tile_to_shape(swizzle_atom, make_shape(bN, bK, bP));
+  auto sA = tile_to_shape(smem_atom, make_shape(bM, bK, bP));
+  auto sB = tile_to_shape(smem_atom, make_shape(bN, bK, bP));
   auto sC = make_layout(make_shape(bM, bN));                        // (m,n) -> smem_idx
 
   

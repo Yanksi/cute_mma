@@ -29,6 +29,25 @@ std::string getTypeName<half>() {
     return "half";
 }
 
+template <typename TA>
+constexpr
+int paddingSize() {
+    static_assert(sizeof(TA) == 0, "This function should not be called");
+    return 0;
+}
+
+template <>
+constexpr
+int paddingSize<float>() {
+    return 4;
+}
+
+template <>
+constexpr
+int paddingSize<half>() {
+    return 8;
+}
+
 namespace cute {
     enum CUTE_MMA_Layout { CUTE_MMA_T, CUTE_MMA_N };
 
