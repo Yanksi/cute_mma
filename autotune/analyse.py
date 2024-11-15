@@ -11,9 +11,12 @@ for dtype in all_results:
     results = all_results[dtype]
     result_table = []
     for k, v in results.items():
-        result_table.append((k, v.get(("TN"), float('nan')), v.get(("NT"), float('nan'))))
+        tn_result = v.get(("TN"), (float('nan'), None, None))
+        nt_result = v.get(("NT"), (float('nan'), None, None))
+        result_table.append((k, tn_result[0], nt_result[0], tn_result[1], nt_result[1], tn_result[2], nt_result[2]))
+        # result_table.append((k, v.get(("TN"), float('nan')), v.get(("NT"), float('nan'))))
 
-    result_table = pd.DataFrame(result_table, columns=["name", "TN", "NT"])
+    result_table = pd.DataFrame(result_table, columns=["name", "TN", "NT", "TN_out", "NT_out", "TN_err", "NT_err"])
 
     # get top performed TN setting by sorting the TN column
     result_table_TN = result_table.sort_values(by="TN", ascending=False)

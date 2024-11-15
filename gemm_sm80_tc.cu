@@ -344,7 +344,7 @@ void gemm_tn_test(int m, int n, int k,
   //   make_stride(bK + Int<paddingSize<TO>()>{}, _1{})
   // );
   auto smem_atom = make_layout(
-    make_shape(_1{}, bK),
+    make_shape(_2{}, bK),
     make_stride(bK + Int<paddingSize<TO>()>{}, _1{})
   );
   // auto sA_atom = make_layout(make_shape (bM, bK), LayoutRight{}); // (m,k) -> smem_idx; padded k-major
