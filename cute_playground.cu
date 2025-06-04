@@ -194,30 +194,98 @@ void ezprep() {
             _
         );
         print(thr_sA.layout()); print("\n");
+        Tensor thr_rA = make_tensor<half_t>(make_shape(shape<0>(thr_sA), shape<1,0>(thr_sA), _2{}));
+        print(thr_rA.layout()); print("\n");
+    }
 
-        // auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
-        //                                         make_tile(
-        //                                             make_layout(size<0>(warp_layout)),
-        //                                             make_layout(size<2>(warp_layout))
-        //                                         )); // ((WARP_GROUP_M, WARP_GROUP_K), (TILE_M, TILE_K))
-        
-        // // mma_thr_layout is the TV layout within a single computation block
-        // // warp_blocks_layout is the layout of the computation blocks
-        // auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sA.layout()));
-        // Tensor sA_blocked = make_tensor(M, overall_layout);
+    std::cout << "------------------" << std::endl;
 
-        // Tensor thr_sA = sA_blocked(
-        //     make_coord(make_coord(make_coord(lane_idx, _), _), _),
-        //     make_coord(make_coord(get<0>(warp_idx_3d), get<2>(warp_idx_3d)), _),
-        //     _
-        // ); // (THR_DATA, ATOM_RECONNECT_K, (ATOM_M, ATOM_K), (TILE_M, TILE_K), PIPE)
+    auto sB_layout = coalesce(tile_to_shape(
+        smem_atom,
+        make_shape(
+            size<1>(cta_tiler),
+            size<2>(cta_tiler),
+            pipeline
+            )
+        ), make_tuple(_1{}, _1{}, _1{}));
 
+    Tensor sB = make_tensor(M, sB_layout);
+    {
+        auto sB_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
+                                      make_layout(size<2>(warp_atom_mnk)));
+        print(sB_warp_tile); print("\n");
+            
+        auto b_tensor_layout = zipped_divide(take<0,2>(sB.layout()), sB_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now, describes how the matrix would be handled by the warps
+        print(b_tensor_layout); print("\n");
 
-        // Tensor thr_rA = make_tensor<half_t>(shape(thr_sA(_, _, _, _, 0)));
-        // print(thr_rA); print("\n");
-                                                       
-        // print(sA_blocked); print("\n");
-        // print(thr_sA); print("\n");
+        auto atom_tile = make_tile(make_layout(_8{}), make_layout(_8{})); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
+
+        // print(sA.layout()); print("\n");
+        // print(a_tensor_layout); print("\n");
+        // findout how each warp would have to handle the matrix in their region of responsibility
+        auto mma_atom_layout = zipped_divide(get<0>(b_tensor_layout), atom_tile); // ((ATOM_SZ_M, ATOM_SZ_K), (ATOM_M, ATOM_K))
+        print(mma_atom_layout); print("\n");
+
+        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
+        print(mma_thr_layout); print("\n");
+
+        auto overall_layout = make_layout(mma_thr_layout, get<1>(b_tensor_layout), layout<2>(sB.layout()));
+        print(overall_layout); print("\n");
+
+        Tensor sB_blocked = make_tensor(M, overall_layout);
+        Tensor thr_sB = sB_blocked(
+            make_coord(make_coord(lane_idx, _), _),
+            make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)),
+            _
+        );
+        print(thr_sB.layout()); print("\n");
+        Tensor thr_rB = make_tensor<half_t>(make_shape(shape<0>(thr_sB), shape<1,0>(thr_sB), _2{}));
+        print(thr_rB.layout()); print("\n");
+    }
+
+    std::cout << "------------------" << std::endl;
+
+    auto sR_layout = coalesce(tile_to_shape(
+        smem_atom,
+        make_shape(
+            size<1>(blocks_tiler) * reconn_sz,
+            size<2>(cta_tiler),
+            pipeline
+            )
+        ), make_tuple(_1{}, _1{}, _1{}));
+
+    Tensor sR = make_tensor(M, sR_layout);
+    {
+        auto sR_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
+                                      make_layout(size<2>(warp_atom_mnk)));
+        print(sR_warp_tile); print("\n");
+            
+        auto b_tensor_layout = zipped_divide(take<0,2>(sB.layout()), sB_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now, describes how the matrix would be handled by the warps
+        print(b_tensor_layout); print("\n");
+
+        auto atom_tile = make_tile(make_layout(_8{}), make_layout(_8{})); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
+
+        // print(sA.layout()); print("\n");
+        // print(a_tensor_layout); print("\n");
+        // findout how each warp would have to handle the matrix in their region of responsibility
+        auto mma_atom_layout = zipped_divide(get<0>(b_tensor_layout), atom_tile); // ((ATOM_SZ_M, ATOM_SZ_K), (ATOM_M, ATOM_K))
+        print(mma_atom_layout); print("\n");
+
+        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
+        print(mma_thr_layout); print("\n");
+
+        auto overall_layout = make_layout(mma_thr_layout, get<1>(b_tensor_layout), layout<2>(sB.layout()));
+        print(overall_layout); print("\n");
+
+        Tensor sB_blocked = make_tensor(M, overall_layout);
+        Tensor thr_sB = sB_blocked(
+            make_coord(make_coord(lane_idx, _), _),
+            make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)),
+            _
+        );
+        print(thr_sB.layout()); print("\n");
+        Tensor thr_rB = make_tensor<half_t>(make_shape(shape<0>(thr_sB), shape<1,0>(thr_sB), _2{}));
+        print(thr_rB.layout()); print("\n");
     }
 }
 
