@@ -107,6 +107,32 @@ void test_inplace() {
     std::cout << std::endl;
 }
 
+template <class NWarp, class L>
+CUTE_HOST_DEVICE constexpr
+auto r_layout_mode1(NWarp n_warps, L layout_group) {
+    using namespace cute;
+    auto n_groups = size<0>(layout_group);
+    if constexpr (n_groups >= n_warps) {
+        // if the number of groups is greater or equal to the number of warps, then each warp will handle at least one group
+        CUTE_STATIC_ASSERT(n_groups % n_warps == 0, "Number of groups must be divisible by number of warps.");
+        return logical_divide(
+            layout_group,
+            make_shape(n_warps)
+        );
+    } else {
+        // if the number of groups is less than the number of warps, then a group would be handled by multiple warps
+        CUTE_STATIC_ASSERT(n_warps % n_groups == 0, "Number of warps must be divisible by number of groups.");
+        auto n_warps_per_group = n_warps / n_groups;
+        return make_layout(
+            make_layout(
+                Layout<decltype(n_warps_per_group), _0>{},
+                layout_group
+            ),
+            Layout<_1, _0>{}
+        );
+    }
+}
+
 void ezprep() {
     // in this function, consider only the case where the first mma atom used is the 16x8x8 one for easier handling
     using namespace cute;
@@ -226,7 +252,7 @@ void ezprep() {
         auto mma_atom_layout = zipped_divide(get<0>(b_tensor_layout), atom_tile); // ((ATOM_SZ_M, ATOM_SZ_K), (ATOM_M, ATOM_K))
         print(mma_atom_layout); print("\n");
 
-        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
+        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom2::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
         print(mma_thr_layout); print("\n");
 
         auto overall_layout = make_layout(mma_thr_layout, get<1>(b_tensor_layout), layout<2>(sB.layout()));
@@ -253,39 +279,73 @@ void ezprep() {
             pipeline
             )
         ), make_tuple(_1{}, _1{}, _1{}));
+    print(sR_layout); print("\n");
+    
+    auto sR_layout_blocked = tiled_divide(
+        sR_layout,
+        make_tile(
+            make_layout(reconn_sz),
+            make_layout(reconn_sz)
+        )
+    );
+    print(sR_layout_blocked); print("\n");
 
-    Tensor sR = make_tensor(M, sR_layout);
+    Tensor sR = make_tensor(M, sR_layout_blocked);
     {
-        auto sR_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
-                                      make_layout(size<2>(warp_atom_mnk)));
-        print(sR_warp_tile); print("\n");
-            
-        auto b_tensor_layout = zipped_divide(take<0,2>(sB.layout()), sB_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now, describes how the matrix would be handled by the warps
-        print(b_tensor_layout); print("\n");
+        auto r_layout_rest = prepend(take<2, 4>(sR.layout()), Layout<_1, _0>{}); // prepend a dummy layout for replace it with n_groups
 
-        auto atom_tile = make_tile(make_layout(_8{}), make_layout(_8{})); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
-
-        // print(sA.layout()); print("\n");
-        // print(a_tensor_layout); print("\n");
-        // findout how each warp would have to handle the matrix in their region of responsibility
-        auto mma_atom_layout = zipped_divide(get<0>(b_tensor_layout), atom_tile); // ((ATOM_SZ_M, ATOM_SZ_K), (ATOM_M, ATOM_K))
-        print(mma_atom_layout); print("\n");
-
-        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
-        print(mma_thr_layout); print("\n");
-
-        auto overall_layout = make_layout(mma_thr_layout, get<1>(b_tensor_layout), layout<2>(sB.layout()));
-        print(overall_layout); print("\n");
-
-        Tensor sB_blocked = make_tensor(M, overall_layout);
-        Tensor thr_sB = sB_blocked(
-            make_coord(make_coord(lane_idx, _), _),
-            make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)),
-            _
+        auto layout_group = layout<1>(sR.layout());
+        auto n_warps = size<1>(warp_layout);
+        auto r_warp_group_layout = r_layout_mode1(n_warps, layout_group);
+        print(r_warp_group_layout); print("\n");
+        // auto r_warp_layout = make_layout(layout<0>(sR.layout()), r_warp_group_layout, take<2, 4>(sR.layout()));
+        auto r_warp_layout = replace<1>(sR_layout_blocked, r_warp_group_layout); // ((RECONN_SZ, RECONN_SZ), (N_WARPS, GROUPS_PER_WAPR), BLOCKS, PIPELINE)
+        // TODO: should tile the reconnection blocks to match the oparand size of mma atom, but for now, we will just use the reconnection size since it is the same as the mma atom size
+        auto mma_thr_layout = composition(
+            r_warp_layout,
+            make_tile(mma_atom1::LayoutB_TV{}, _, _, _)
         );
-        print(thr_sB.layout()); print("\n");
-        Tensor thr_rB = make_tensor<half_t>(make_shape(shape<0>(thr_sB), shape<1,0>(thr_sB), _2{}));
-        print(thr_rB.layout()); print("\n");
+        print(mma_thr_layout); print("\n");
+        Tensor sR_blocked = make_tensor(M, mma_thr_layout);
+        Tensor thr_sR = sR_blocked(
+            make_coord(lane_idx, _),
+            make_coord(get<1>(warp_idx_3d), _),
+            _, _
+        );
+        print(thr_sR.layout()); print("\n");
+        Tensor thr_rR = make_tensor<half_t>(make_shape(shape<0>(thr_sR), shape<1>(thr_sR), _2{}));
+        print(thr_rR.layout()); print("\n");
+
+        // auto sR_warp_tile = make_tile(make_layout(reconn_sz), 
+        //                               make_layout(size<2>(warp_atom_mnk)));
+        // print(sR_warp_tile); print("\n");
+            
+        // auto r_tensor_layout = zipped_divide(take<0,2>(sB.layout()), sR_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now, describes how the matrix would be handled by the warps
+        // print(b_tensor_layout); print("\n");
+
+        // auto atom_tile = make_tile(make_layout(_8{}), make_layout(_8{})); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
+
+        // // print(sA.layout()); print("\n");
+        // // print(a_tensor_layout); print("\n");
+        // // findout how each warp would have to handle the matrix in their region of responsibility
+        // auto mma_atom_layout = zipped_divide(get<0>(b_tensor_layout), atom_tile); // ((ATOM_SZ_M, ATOM_SZ_K), (ATOM_M, ATOM_K))
+        // print(mma_atom_layout); print("\n");
+
+        // auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_M, ATOM_K))
+        // print(mma_thr_layout); print("\n");
+
+        // auto overall_layout = make_layout(mma_thr_layout, get<1>(b_tensor_layout), layout<2>(sB.layout()));
+        // print(overall_layout); print("\n");
+
+        // Tensor sB_blocked = make_tensor(M, overall_layout);
+        // Tensor thr_sB = sB_blocked(
+        //     make_coord(make_coord(lane_idx, _), _),
+        //     make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)),
+        //     _
+        // );
+        // print(thr_sB.layout()); print("\n");
+        // Tensor thr_rB = make_tensor<half_t>(make_shape(shape<0>(thr_sB), shape<1,0>(thr_sB), _2{}));
+        // print(thr_rB.layout()); print("\n");
     }
 }
 
