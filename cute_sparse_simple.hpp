@@ -165,6 +165,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                                   make_layout(size<2>(warp_atom_mnk)));
     auto sB_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)),
                                   make_layout(size<2>(warp_atom_mnk)));
+    auto gC_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)),
+                                  make_layout(size<1>(warp_atom_mnk)));
         
     auto a_atom_tile = make_tile(make_layout(size<0>(sA_warp_tile)), make_layout(reconn_sz));
     auto a_tensor_layout = flat_divide(sA.layout(), sA_warp_tile);
@@ -177,10 +179,14 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     CUTE_STATIC_ASSERT_V(size<4>(r_warp_layout) == Int<1>{}); // TODO: for now, suppose each warp would only handle one group, then ignore the group dimension
     Tensor sR_warp_atom = make_tensor(make_smem_ptr(smemR), select<0, 1, 2, 3, 5>(r_warp_layout)); // (RECONN_SZ, RECONN_SZ, BLOCKS, WARP_N, GROUPS_PER_WARP, PIPELINE)
 
-    // For b, there's no need to define the atom tiling
-    auto b_tensor_layout = flat_divide(take<1,2>(sB.layout()), sB_warp_tile) // (ATOM_N, ATOM_K, WARP_N, WARP_K)
-    Tensor sB_warp_atom = make_tensor(make_smem_ptr(smemB), b_tensor_layout); // (ATOM_N, ATOM_K, WARP_N, WARP_K, PIPELINE)
-    
+    auto b_atom_tile = make_tile(make_layout(size<0>(sB_warp_tile)), make_layout(reconn_sz));
+    auto b_tensor_layout = flat_divide(sB.layout(), sB_warp_tile); // (ATOM_N, ATOM_K, WARP_N, WARP_K, PIPELINE)
+    auto b_atom_layout = select<0, 1, 3, 4, 5, 6>(flat_divide(b_tensor_layout, b_atom_tile)); // (ATOM_N, ATOM_K, BLOCKS, WARP_N, WARP_K, PIPELINE)
+    Tensor sB_warp_atom = make_tensor(make_smem_ptr(smemB), b_atom_layout); // (ATOM_N, ATOM_K, BLOCKS, WARP_N, WARP_K, PIPELINE)
+
+    Tensor gC_warp_all = flat_divide(gC, gC_warp_tile); // (WARP_SIZE_M, WARP_SIZE_N, WARP_M, WARP_N)
+    Tensor gC_warp = gC_warp_all(_, _, get<0>(warp_coord), get<1>(warp_coord)); // (WARP_SIZE_M, WARP_SIZE_N)
+
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
         make_layout(make_shape(_1{}, _1{})),
@@ -197,10 +203,79 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     int lane_idx = threadIdx.x % 32;
     auto warp_coord = warp_layout.get_hier_coord(warp_idx); // (WARP_M, WARP_N, WARP_K)
 
-    ThrMMA thr_mma1 = single_warp_mma.get_slice(warp_idx);
+    ThrMMA thr_mma1 = single_warp_mma1.get_slice(warp_idx);
+    ThrMMA thr_mma2 = single_warp_mma2.get_slice(warp_idx);
     Tensor tCsA = thr_mma1.partition_A(sA_warp_atom(_, _, _, get<0>(warp_coord), get<2>(warp_coord), _)); // (MMA, MMA_M, MMA_K, BLOCKS, PIPELINE)
     Tensor tCsR = thr_mma1.partition_B(sR_warp_atom(_, _, _, get<1>(warp_coord), _)); // (MMA, MMA_N, MMA_K, BLOCKS, PIPELINE) // TODO: Group ignorance here
+    Tensor tCsB = thr_mma2.partition_B(sB_warp_atom(_, _, _, get<1>(warp_coord), get<2>(warp_coord), _)); // (MMA, MMA_N, MMA_K, BLOCKS, PIPELINE)
+    Tensor tCgC = thr_mma2.partition_C(gC_warp);
 
     Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_, _, _, _, 0)); // (MMA, MMA_M, MMA_K, BLOCKS)
     Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_, _, _, _, 0)); // (MMA, MMA_N, MMA_K, BLOCKS)
+    Tensor tCrB = thr_mma2.make_fragment_B(tCsB(_, _, _, _, 0)); // (MMA, MMA_N, MMA_K, BLOCKS)
+    Tensor tCrC = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N)
+    clear(tCrC); // Clear the accumulators
+
+    int smem_pipe_read  = 0;
+    // Current pipe index in smem to write to
+    int smem_pipe_write = K_PIPE_MAX-1;
+
+    Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
+    Tensor tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
+
+    // Size of the register pipeline
+    auto K_BLOCK_MAX = size<3>(tCrA);
+
+    // PREFETCH register pipeline
+    if (K_BLOCK_MAX > 1) {
+        // Wait util our first prefetched tile is loaded in
+        cp_async_wait<K_PIPE_MAX-2>();
+        __syncthreads();
+
+        // Prefetch the first rmem from the first k-tile
+        copy(tCsA_p(_,_,_,Int<0>{}), tCrA(_,_,_,Int<0>{}));
+        copy(tCsB_p(_,_,_,Int<0>{}), tCrB(_,_,_,Int<0>{}));
+    }
+
+    // Don't need the register pipeline with the use of tensor cores
+    CUTE_NO_UNROLL
+    while (k_tile_count > -(K_PIPE_MAX - 1))
+    {
+        CUTE_UNROLL
+        for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
+            if (k_block == K_BLOCK_MAX - 1) {
+                // Slice the smem_pipe_read smem
+                tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
+                tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
+
+                // Commit the smem for smem_pipe_read
+                cp_async_wait<K_PIPE_MAX-2>();
+                __syncthreads();
+            }
+
+            // Load A, B shmem->regs for k_block+1
+            auto k_block_next = (k_block + Int<1>{}) % K_BLOCK_MAX;      // static
+            copy(tCsA_p(_,_,_,k_block_next), tCrA(_,_,_,k_block_next));
+            copy(tCsB_p(_,_,_,k_block_next), tCrB(_,_,_,k_block_next));
+
+            // Copy gmem to smem before computing gemm on each k-pipe
+            if (k_block == 0) {
+                copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+                copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
+                cp_async_fence();
+
+                // Advance the gmem tile
+                --k_tile_count;
+                if (k_tile_count > 0) { ++k_tile_next; }
+
+                // Advance the smem pipe
+                smem_pipe_write = smem_pipe_read;
+                ++smem_pipe_read;
+                smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
+            }
+            gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,k_block), tCrA(_,_,_,k_block));
+            gemm(single_warp_mma2, tCrA(_,_,_,k_block), tCrB(_,_,_,k_block), tCrC);
+        }
+    }
+    copy(tCrC, tCgC); // Write back the result to global memory
 }
