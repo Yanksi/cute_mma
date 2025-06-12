@@ -4,6 +4,9 @@
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 
+#define mmax(a,b) ((a) > (b) ? (a) : (b))
+#define mmin(a,b) ((a) < (b) ? (a) : (b))
+
 template <bool inplace, class TA, class TB, class TC, class MMA_ATOM>
 __global__ static void inplace_mma_test(
     TA const *A, TB const *B, TC *C, MMA_ATOM atom
@@ -106,6 +109,52 @@ void test_inplace() {
     }
     std::cout << std::endl;
 }
+
+
+template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
+  typename _BM, typename _BK, typename _N_Threads>
+constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
+  using namespace cute;
+  constexpr int vec_width = sizeof(copy_as_t) / sizeof(ele_t);
+  constexpr int total_elements = bm * bk;
+
+  constexpr int needed_threads = total_elements / vec_width;
+  CUTE_STATIC_ASSERT(total_elements % vec_width == 0);
+  constexpr int total_threads = mmin(_total_threads, needed_threads);
+
+  constexpr int elements_per_thread = total_elements / total_threads;
+  CUTE_STATIC_ASSERT(total_elements % total_threads == 0);
+  CUTE_STATIC_ASSERT(elements_per_thread % vec_width == 0);
+  constexpr auto get_cp_width = []() {
+    if constexpr (block_tiling) {
+      return vec_width;
+    } else {
+      return elements_per_thread;
+    }
+  };
+  constexpr int cp_width = get_cp_width();
+  if constexpr (k_major) {
+    CUTE_STATIC_ASSERT(!block_tiling || bk % cp_width == 0);
+    CUTE_STATIC_ASSERT(block_tiling || (bk % cp_width == 0 || cp_width % bk == 0));
+    constexpr int threads_along_k = mmax(bk / cp_width, 1);
+    constexpr int threads_k_size = bk / threads_along_k;
+    constexpr int threads_m_size = mmax(cp_width / bk, 1);
+    constexpr int threads_along_m = total_threads / threads_along_k;
+    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
+                           make_layout(Shape<Int<threads_along_m>, Int<threads_along_k>>{}, LayoutRight{}),
+                          //  Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
+                           Layout<Shape<Int<threads_m_size>, Int<threads_k_size>>>{});
+  } else {
+    // As it not really possible to have copy width greater than bm, we don't need to check for that
+    CUTE_STATIC_ASSERT(bm % cp_width == 0);
+    constexpr int threads_along_m = bm / cp_width;
+    constexpr int threads_along_k = total_threads / threads_along_m;
+    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
+                           Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
+                           Layout<Shape<Int<cp_width>, _1>>{});
+  }
+}
+
 
 template <class NWarp, class L>
 CUTE_HOST_DEVICE constexpr
@@ -360,9 +409,20 @@ int main() {
 
 
     // return 0;
-    ezprep();
-    return 0;
     half_t* M = new half_t[256*256*3];
+    Tensor m = make_tensor(M, make_layout(
+        make_shape(_8{}, _16{}, _3{})
+    ));
+    TiledCopy copyR = cp_layout<uint128_t, half_t, true, true>(
+        _8{}, _16{}, _8{} * _32{}
+    );
+    print(copyR); print("\n");
+    print(size(copyR)); print("\n");
+    print(copyR.get_slice(255).partition_S(m)); print("\n");
+    return 0;
+    // ezprep();
+    // return 0;
+    
 
     auto blocks_tiler = make_shape(
         _128{}, _1{}, _8{} // (BATCH_SZ, N_GROUPS, N_BLOCKS)

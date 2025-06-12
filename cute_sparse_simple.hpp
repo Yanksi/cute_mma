@@ -31,13 +31,13 @@ template <class ProblemShape, class BlocksTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize,
           class BLayout, class TiledCopyB,
-          class CLayout, class WarpLayout>
+          class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * _32{})::value)
 void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                 half_t const *A, ALayout layout_a, TiledCopyA copy_a,
                 half_t const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_size,
                 half_t const *B, BLayout layout_b, TiledCopyB copy_b,
-                half_t *C, CLayout layout_c, WarpLayout warp_layout)
+                half_t       *C, CLayout layout_c, WarpLayout warp_layout, Pipeline pipeline)
 {
     using namespace cute;
 
@@ -66,8 +66,6 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
     using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
     using mma_atom2 = mma_atom1;
-
-    auto pipeline = _3{};
 
     auto sA_layout = coalesce(tile_to_shape(
         smem_atom,
@@ -150,7 +148,10 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
         copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-        copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
+        if (threadIdx.x < size(copy_r)) {
+            // Only copy R if the threadIdx.x is within the range of copy_r
+            copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
+        }
         copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
         cp_async_fence();
         --k_tile_count;
@@ -221,6 +222,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     int smem_pipe_write = K_PIPE_MAX-1;
 
     Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
+    Tensor tCsR_p = tCsR(_,_,_,_,smem_pipe_read);
     Tensor tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
 
     // Size of the register pipeline
@@ -234,6 +236,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
         // Prefetch the first rmem from the first k-tile
         copy(tCsA_p(_,_,_,Int<0>{}), tCrA(_,_,_,Int<0>{}));
+        copy(tCsR_p(_,_,_,Int<0>{}), tCrR(_,_,_,Int<0>{}));
         copy(tCsB_p(_,_,_,Int<0>{}), tCrB(_,_,_,Int<0>{}));
     }
 
@@ -256,11 +259,15 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             // Load A, B shmem->regs for k_block+1
             auto k_block_next = (k_block + Int<1>{}) % K_BLOCK_MAX;      // static
             copy(tCsA_p(_,_,_,k_block_next), tCrA(_,_,_,k_block_next));
+            copy(tCsR(_,_,_,k_block_next), tCrR(_,_,_,k_block_next));
             copy(tCsB_p(_,_,_,k_block_next), tCrB(_,_,_,k_block_next));
 
             // Copy gmem to smem before computing gemm on each k-pipe
             if (k_block == 0) {
                 copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+                if (threadIdx.x < size(copy_r)) {
+                    copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
+                }
                 copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
                 cp_async_fence();
 

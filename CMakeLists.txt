@@ -63,6 +63,9 @@ set(COMMON_INCLUDE_DIRS
 add_executable(playground cute_playground.cu)
 target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
+add_executable(sparse cute_sparse.cu)
+target_include_directories(sparse PRIVATE ${COMMON_INCLUDE_DIRS})
+
 set(dtypes_o half float)
 set(dtypes_r half float)
 
