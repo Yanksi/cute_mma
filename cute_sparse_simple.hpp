@@ -1,28 +1,47 @@
 #pragma once
 #include <cute/tensor.hpp>
 
-template <class NWarp, class L>
+// template <class NWarp, class L>
+// CUTE_HOST_DEVICE constexpr
+// auto r_layout_mode1(NWarp n_warps, L layout_group) {
+//     using namespace cute;
+//     auto n_groups = size<0>(layout_group);
+//     if constexpr (n_groups >= n_warps) {
+//         // if the number of groups is greater or equal to the number of warps, then each warp will handle at least one group
+//         CUTE_STATIC_ASSERT(n_groups % n_warps == 0, "Number of groups must be divisible by number of warps.");
+//         return logical_divide(
+//             layout_group,
+//             make_shape(n_warps)
+//         );
+//     } else {
+//         // if the number of groups is less than the number of warps, then a group would be handled by multiple warps
+//         CUTE_STATIC_ASSERT(n_warps % n_groups == 0, "Number of warps must be divisible by number of groups.");
+//         auto n_warps_per_group = n_warps / n_groups;
+//         return make_layout(
+//             make_layout(
+//                 Layout<decltype(n_warps_per_group), _0>{},
+//                 layout_group
+//             ),
+//             Layout<_1, _0>{}
+//         );
+//     }
+// }
+
+template <class WARP_N, class N_GROUPS>
 CUTE_HOST_DEVICE constexpr
-auto r_layout_mode1(NWarp n_warps, L layout_group) {
+auto r_layout_mode1(WARP_N warp_n, N_GROUPS n_groups) {
     using namespace cute;
-    auto n_groups = size<0>(layout_group);
-    if constexpr (n_groups >= n_warps) {
+    // would generate a layout with the size of (groups_per_warp, n_warps)
+    if constexpr (n_groups >= warp_n) {
         // if the number of groups is greater or equal to the number of warps, then each warp will handle at least one group
-        CUTE_STATIC_ASSERT(n_groups % n_warps == 0, "Number of groups must be divisible by number of warps.");
-        return logical_divide(
-            layout_group,
-            make_shape(n_warps)
-        );
+        CUTE_STATIC_ASSERT_V(n_groups % warp_n == 0, "Number of groups must be divisible by number of warps.");
+        return make_layout(make_shape(n_groups / warp_n, warp_n));
     } else {
         // if the number of groups is less than the number of warps, then a group would be handled by multiple warps
-        CUTE_STATIC_ASSERT(n_warps % n_groups == 0, "Number of warps must be divisible by number of groups.");
-        auto n_warps_per_group = n_warps / n_groups;
+        CUTE_STATIC_ASSERT_V(warp_n % n_groups == 0, "Number of warps must be divisible by number of groups.");
         return make_layout(
-            make_layout(
-                Layout<decltype(n_warps_per_group), _0>{},
-                layout_group
-            ),
-            Layout<_1, _0>{}
+            make_shape(_1{}, make_shape(warp_n / n_groups, n_groups)),
+            make_stride(_0{}, make_stride(_0{}, _1{}))
         );
     }
 }
@@ -32,36 +51,50 @@ template <class ProblemShape, class BlocksTiler,
           class RLayout, class TiledCopyR, class GroupSize,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayout, class Pipeline>
-__global__ static __launch_bounds__(decltype(size(WarpLayout{}) * _32{})::value)
+__global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
 void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
-                half_t const *A, ALayout layout_a, TiledCopyA copy_a,
-                half_t const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_size,
-                half_t const *B, BLayout layout_b, TiledCopyB copy_b,
-                half_t       *C, CLayout layout_c, WarpLayout warp_layout, Pipeline pipeline)
+                half const *A, ALayout layout_a, TiledCopyA copy_a,
+                half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_size,
+                half const *B, BLayout layout_b, TiledCopyB copy_b,
+                half       *C, CLayout layout_c, WarpLayout warp_layout, Pipeline pipeline)
 {
     using namespace cute;
 
     // Preconditions
     CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});    // (M, N, K)
-    static_assert(is_static<blocks_tiler>::value);
+    CUTE_STATIC_ASSERT_V(size<1>(blocks_tiler) >= Int<1>{}); // Assume each thread block would handle at least one groups
+    CUTE_STATIC_ASSERT_V(is_integral<decltype(size<1>(blocks_tiler))>{});
+    static_assert(is_static<BlocksTiler>::value);
     CUTE_STATIC_ASSERT_V(rank(blocks_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
     auto reconn_sz = size<2>(layout_r);
+    CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
-    Shape cta_tiler = make_shape(
+    auto cta_tiler = make_shape(
         size<0>(blocks_tiler),                    // BLK_M
         size<1>(blocks_tiler) * group_size,       // BLK_N
         size<2>(blocks_tiler) * reconn_sz         // BLK_K
     );
 
-    auto smem_atom = make_layout( // two rows of padded shared memory layout atom, should be replaced by swizzle
-        make_shape(_2{}, size<2>(cta_tiler)),
-        make_stride(size<2>(cta_tiler) + _8{} /*padding size required for half*/, _1{})    
-    );
+    // auto smem_atom = make_layout( // two rows of padded shared memory layout atom, should be replaced by swizzle
+    //     make_shape(_2{}, size<2>(cta_tiler)),
+    //     make_stride(size<2>(cta_tiler) + _8{} /*padding size required for half*/, _1{})    
+    // );
 
-    auto warp_atom_mnk = make_shape(
+    constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value));
+
+    auto smem_atom = composition(
+          Swizzle<k_bit_width,6 - k_bit_width>{},
+          Layout<
+            Shape <_8, Shape <_8,  decltype(size<2>(blocks_tiler))>>,
+            Stride<_8, Stride<_1, _64>>
+          >{}
+        );
+    
+    CUTE_STATIC_ASSERT_V(size<2>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
+    
+    auto warp_atom_mn = make_shape(
         size<0>(cta_tiler) / size<0>(warp_layout), // BLK_M / WARP_M
-        size<1>(cta_tiler) / size<1>(warp_layout), // BLK_N / WARP_N
-        size<2>(cta_tiler) / size<2>(warp_layout)  // BLK_K / WARP_K
+        size<1>(cta_tiler) / size<1>(warp_layout)  // BLK_N / WARP_N  <- the size of this shall not be changed, otherwiseit will be wasteful in terms of register usage
     ); // A rather simple way to tile the warps, the shape of the tensor that each warp should handles
 
     using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
@@ -92,7 +125,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             size<2>(cta_tiler),
             pipeline
             )
-        ), make_tuple(_1{}, _1{}, _1{}));
+        ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
     
     auto sR_layout_4d = tiled_divide(
         sR_layout_2d,
@@ -103,13 +136,13 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     ); // ((R, R), BLK_N_GROUPS, BLK_K_GROUPS, PIPE)
 
     // Shared memory buffers
-    __shared__ half_t smemA[cosize_v<decltype(sA_layout)>];
-    __shared__ half_t smemR[cosize_v<decltype(sR_layout_4d)>];
-    __shared__ half_t smemB[cosize_v<decltype(sB_layout)>];
+    __shared__ half smemA[cosize_v<decltype(sA_layout)>];
+    __shared__ half smemR[cosize_v<decltype(sR_layout_4d)>];
+    __shared__ half smemB[cosize_v<decltype(sB_layout)>];
 
     Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout); // (BLK_M, BLK_K, PIPE)
     Tensor sR2d = make_tensor(make_smem_ptr(smemR), sR_layout_2d); // (GROUP * R, BLOCK * R, PIPE)
-    Tensor sR4d = make_tensor(make_smem_ptr(smemR), sR_layout_4d); // ((R, R), (BLK_N_GROUPS, BLK_K_BLOCKS, PIPE))
+    Tensor sR4d = make_tensor(make_smem_ptr(smemR), sR_layout_4d); // ((R, R), BLK_N_GROUPS, BLK_K_GROUPS, PIPE)
     Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout); // (BLK_N, BLK_K, PIPE)
 
     // Full and Tiled Tensors
@@ -120,10 +153,13 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
     auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
-    int group_coord = blockIdx.y * size<1>(cta_tiler) / group_size; // (GROUP, BLOCK)
-    Tensor gR = local_tile(mR, cta_tiler, make_coord(_, group_coord, _), Step<X,_1,_1>{});
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)
     Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1,X>{});  // (BLK_M,BLK_N)
+    Tensor gR = local_tile(mR,
+        make_shape(
+            size<1>(blocks_tiler) * reconn_sz,
+            size<2>(cta_tiler)
+        ), make_coord(blockIdx.y, _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
 
     //
     // Partition the copying of A and B tiles across the threads
@@ -161,29 +197,69 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     //
     // Define A/B partitioning and C accumulators manually
     //
+    
+    int warp_idx = threadIdx.x / 32;
+    int lane_idx = threadIdx.x % 32;
+    auto warp_coord = warp_layout.get_hier_coord(warp_idx); // (WARP_M, WARP_N)
 
-    auto sA_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)), 
-                                  make_layout(size<2>(warp_atom_mnk)));
-    auto sB_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)),
-                                  make_layout(size<2>(warp_atom_mnk)));
-    auto gC_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)),
-                                  make_layout(size<1>(warp_atom_mnk)));
-        
-    auto a_atom_tile = make_tile(make_layout(size<0>(sA_warp_tile)), make_layout(reconn_sz));
-    auto a_tensor_layout = flat_divide(sA.layout(), sA_warp_tile);
-    auto a_atom_layout = select<0, 1, 3, 4, 5, 6>(flat_divide(a_tensor_layout, a_atom_tile)); // （ATOM_M, ATOM_K, BLOCKS, WARP_M, WARP_K, PIPELINE)
-    Tensor sA_warp_atom = make_tensor(make_smem_ptr(smemA), a_atom_layout); // (ATOM_M, ATOM_K, BLOCKS, WARP_M, WARP_K, PIPELINE)
+    Tensor a_atom_tiles = logical_divide(
+        sA,
+        make_tile(
+            make_layout(
+                make_shape(
+                    size<0>(warp_atom_mn), // WARP_M
+                    size<0>(warp_layout)
+                )
+            ),
+            make_layout(
+                reconn_sz
+            )
+        )
+    ); // (((WARP_ATOM_M, WAPRS_ALONG_M), REST_M), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
 
-    auto r_warp_group_layout = r_layout_mode1(size<1>(warp_layout), layout<1>(sR4d));
+    Tensor _a_warp_tensor = a_atom_tiles(make_coord(make_coord(_, get<0>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_M, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    Tensor a_warp_tensor = make_tensor(
+        _a_warp_tensor.data(),
+        coalesce(group<0,2>(_a_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    );
+
+    Tensor b_atom_tiles = logical_divide(
+        sB,
+        make_tile(
+            make_layout(
+                make_shape(
+                    size<1>(warp_atom_mn), // WARP_N
+                    size<1>(warp_layout)
+                )
+            ),
+            make_layout(
+                reconn_sz
+            )
+        )
+    );
+
+    Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    Tensor b_warp_tensor = make_tensor(
+        _b_warp_tensor.data(),
+        coalesce(group<0,2>(_b_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_N_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    );
+
+    // create the group dimension for each warp
+    auto warp_group_sz = min(size<0>(b_warp_tensor), group_size);
+    Tensor b_warp_grouped = logical_divide(
+        b_warp_tensor,
+        make_tile(make_layout(warp_group_sz))
+    ); // ((WARP_GROUP_SIZE, WAPR_N_GROUPS), RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+
+
+    auto r_warp_group_layout = r_layout_mode1(size<1>(warp_layout), size<1>(sR4d));
+    Tensor r_warp_tensor = sR4d.compose(make_tile(_, r_warp_group_layout));
+
     auto _r_warp_layout = replace<1>(sR4d, r_layout_mode1); // ((RECONN_SZ, RECONN_SZ), (WARP_N, GROUPS_PER_WARP), BLOCKS, PIPELINE)
     auto r_warp_layout = flatten(select<0, 2, 1, 3>(_r_warp_layout)); // (RECONN_SZ, RECONN_SZ, BLOCKS, WARP_N, GROUPS_PER_WARP, PIPELINE)
     CUTE_STATIC_ASSERT_V(size<4>(r_warp_layout) == Int<1>{}); // TODO: for now, suppose each warp would only handle one group, then ignore the group dimension
     Tensor sR_warp_atom = make_tensor(make_smem_ptr(smemR), select<0, 1, 2, 3, 5>(r_warp_layout)); // (RECONN_SZ, RECONN_SZ, BLOCKS, WARP_N, GROUPS_PER_WARP, PIPELINE)
 
-    auto b_atom_tile = make_tile(make_layout(size<0>(sB_warp_tile)), make_layout(reconn_sz));
-    auto b_tensor_layout = flat_divide(sB.layout(), sB_warp_tile); // (ATOM_N, ATOM_K, WARP_N, WARP_K, PIPELINE)
-    auto b_atom_layout = select<0, 1, 3, 4, 5, 6>(flat_divide(b_tensor_layout, b_atom_tile)); // (ATOM_N, ATOM_K, BLOCKS, WARP_N, WARP_K, PIPELINE)
-    Tensor sB_warp_atom = make_tensor(make_smem_ptr(smemB), b_atom_layout); // (ATOM_N, ATOM_K, BLOCKS, WARP_N, WARP_K, PIPELINE)
 
     Tensor gC_warp_all = flat_divide(gC, gC_warp_tile); // (WARP_SIZE_M, WARP_SIZE_N, WARP_M, WARP_N)
     Tensor gC_warp = gC_warp_all(_, _, get<0>(warp_coord), get<1>(warp_coord)); // (WARP_SIZE_M, WARP_SIZE_N)
@@ -200,9 +276,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         Tile<decltype(size<0>(warp_atom_mnk)), decltype(size<1>(warp_atom_mnk))>{}
     );
 
-    int warp_idx = threadIdx.x / 32;
-    int lane_idx = threadIdx.x % 32;
-    auto warp_coord = warp_layout.get_hier_coord(warp_idx); // (WARP_M, WARP_N, WARP_K)
+    
 
     ThrMMA thr_mma1 = single_warp_mma1.get_slice(warp_idx);
     ThrMMA thr_mma2 = single_warp_mma2.get_slice(warp_idx);

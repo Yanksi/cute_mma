@@ -7,110 +7,6 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
-template <bool inplace, class TA, class TB, class TC, class MMA_ATOM>
-__global__ static void inplace_mma_test(
-    TA const *A, TB const *B, TC *C, MMA_ATOM atom
-) {
-    using namespace cute;
-    using mma_atom = MMA_Atom<MMA_ATOM>;
-    Tensor mA = make_tensor(A, make_layout(
-        make_shape(size<0>(typename mma_atom::Shape_MNK{}),
-                   size<2>(typename mma_atom::Shape_MNK{})),
-        LayoutRight{}
-    ));
-    Tensor mB = make_tensor(B, make_layout(
-        make_shape(size<1>(typename mma_atom::Shape_MNK{}),
-                   size<2>(typename mma_atom::Shape_MNK{})),
-        LayoutRight{}
-    ));
-    Tensor mC = make_tensor(C, make_layout(
-        make_shape(size<0>(typename mma_atom::Shape_MNK{}),
-                   size<1>(typename mma_atom::Shape_MNK{})),
-        LayoutRight{}
-    ));
-
-    TiledMMA mmaC = make_tiled_mma(
-                    MMA_ATOM{},
-                    make_layout(make_shape(_1{}, _1{})),
-                    Tile<decltype(size<0>(mA)), decltype(size<0>(mB))>{});  // 16x8x8 TiledMMA
-    
-    ThrMMA thr_mma = mmaC.get_slice(threadIdx.x);
-    Tensor tCgC = thr_mma.partition_C(mC);
-    Tensor tCrC = thr_mma.make_fragment_C(tCgC);
-    Tensor tCgA = thr_mma.partition_A(mA);
-    Tensor tCrA = thr_mma.make_fragment_A(tCgA);
-    Tensor tCgB = thr_mma.partition_B(mB);
-    Tensor tCrB = thr_mma.make_fragment_B(tCgB);
-
-    if (threadIdx.x == 0) {
-        print(tCrA); print("\n");
-        print(tCrB); print("\n");
-        print(tCrC); print("\n");
-    }
-
-    copy(tCgA, tCrA);
-    copy(tCgB, tCrB);
-    if constexpr (inplace) {
-        gemm(mmaC, tCrA, tCrB, tCrA);
-        copy(tCrA, tCgC);
-    } else {
-        copy(tCgC, tCrC);
-        gemm(mmaC, tCrA, tCrB, tCrC);
-        copy(tCrC, tCgC);
-    }
-    // gemm(mmaC, tCrA, tCrB, tCrC);
-    // copy(tCrC, tCgC);
-}
-
-void test_inplace() {
-    using namespace cute;
-    thrust::host_vector<half_t> hA(16 * 8);
-    thrust::host_vector<half_t> hB(8 * 8);
-    thrust::host_vector<half_t> hC(16 * 8);
-
-    for (int i = 0; i < 16 * 8; i++) {
-        hA[i] = rand() / double(RAND_MAX);
-    }
-
-    for (int i = 0; i < 8 * 8; i++) {
-        hB[i] = rand() / double(RAND_MAX);
-        int ii = i / 8;
-        int jj = i % 8;
-        // if (ii == jj) {
-        //     hB[i] = hB[i] - 1.0;
-        // }
-    }
-
-    for (int i = 0; i < 16 * 8; i++) {
-        hC[i] = hA[i];
-    }
-
-    thrust::device_vector<half_t> dA = hA;
-    thrust::device_vector<half_t> dB = hB;
-    thrust::device_vector<half_t> dC = hC;
-
-    dim3 dimBlock(32);
-    dim3 dimGrid(1);
-
-    inplace_mma_test<false><<<dimGrid, dimBlock>>>(dA.data().get(), dB.data().get(), dC.data().get(), SM80_16x8x8_F16F16F16F16_TN{});
-
-    thrust::host_vector<half_t> hC2 = dC;
-    for (int i = 0; i < 16 * 8; i++) {
-        std::cout << hC2[i] << " ";
-    }
-
-    std::cout << std::endl;
-
-    inplace_mma_test<true><<<dimGrid, dimBlock>>>(dA.data().get(), dB.data().get(), dC.data().get(), SM80_16x8x8_F16F16F16F16_TN{});
-
-    hC2 = dC;
-    for (int i = 0; i < 16 * 8; i++) {
-        std::cout << hC2[i] << " ";
-    }
-    std::cout << std::endl;
-}
-
-
 template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
   typename _BM, typename _BK, typename _N_Threads>
 constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
@@ -401,127 +297,210 @@ void ezprep() {
 
 int main() {
     using namespace cute;
-    // test_inplace();
-    // auto t = make_tuple(_256{}, R<1, 2>{});
-    // R<1,2> r;
-
-    // print(round_up(r * _3{})); print("\n");
-
-
+    // auto swizzle_atom = composition(Swizzle<1, 5>{},
+    //                               Layout<Shape <_8,Shape <_8, _2>>,
+    //                                      Stride<_8,Stride<_1,_64>>>{});
+    // auto sAl = tile_to_shape(swizzle_atom, make_shape(_64{},_16{}));
+    // // print_latex(swizzle_atom); print("\n");
+    // print_latex(sAl); print("\n");
+    // // print_latex(select<0, 1>(sAl)); print("\n");
     // return 0;
-    half_t* M = new half_t[256*256*3];
-    Tensor m = make_tensor(M, make_layout(
-        make_shape(_8{}, _16{}, _3{})
-    ));
-    TiledCopy copyR = cp_layout<uint128_t, half_t, true, true>(
-        _8{}, _16{}, _8{} * _32{}
-    );
-    print(copyR); print("\n");
-    print(size(copyR)); print("\n");
-    print(copyR.get_slice(255).partition_S(m)); print("\n");
-    return 0;
-    // ezprep();
+
+    // auto a = _8{};
+    // constexpr auto k_bit_a = log_2(static_cast<unsigned int>(decltype(a)::value));
+    // print(Int<k_bit_a>{}); print("\n");
     // return 0;
-    
 
-    auto blocks_tiler = make_shape(
-        _128{}, _1{}, _8{} // (BATCH_SZ, N_GROUPS, N_BLOCKS)
-    );
-
-    auto reconn_sz = _8{};
+    half* M = new half[256*256*3];
     auto group_sz = _128{};
+    auto reconn_sz = _8{};
+    auto blocks_tiler = make_shape(
+        _256{}, _2{}, _2{}
+    );
     auto pipeline = _3{};
-
     auto cta_tiler = make_shape(
         size<0>(blocks_tiler), // BM
         size<1>(blocks_tiler) * group_sz, // BN
         size<2>(blocks_tiler) * reconn_sz // BK
     );
 
-    auto smem_atom = make_layout( // two rows of padded shared memory layout atom, should be replaced by swizzle
-        make_shape(_2{}, size<2>(cta_tiler)),
-        make_stride(size<2>(cta_tiler) + _8{}, _1{})
-    );
-
-    auto warp_layout = make_layout(
-        make_shape(_4{}, _2{}, _1{})
-    );
-
-    auto warp_atom_mnk = make_shape(
-        size<0>(cta_tiler) / size<0>(warp_layout), // WARP_ATOM_M
-        size<1>(cta_tiler) / size<1>(warp_layout), // WARP_ATOM_N
-        size<2>(cta_tiler) / size<2>(warp_layout)  // WARP_ATOM_K
-    ); // A rather simple way to tile the warps
-
-    // auto warp_atom_mnk = make_shape(_16{}, group_sz, _16{}); // the minimum sized block that each warp should work on at once
-
-    // TiledMMA warp_mma = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{});  // 16x8x8 TiledMMA
-    using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
-    using mma_atom2 = mma_atom1;
-
-    int thread_idx = 128;
-    int warp_idx = thread_idx / 32;
-    int lane_idx = thread_idx % 32;
-    auto warp_idx_3d = warp_layout.get_hier_coord(warp_idx);
-    print(warp_idx_3d); print("\n");
-
-    auto sA_layout = tile_to_shape(
+    auto smem_atom = composition(
+          Swizzle<1,5>{},
+          Layout<
+            Shape <_8, Shape <_8,  _2>>,
+            Stride<_8, Stride<_1, _64>>
+          >{}
+        );
+    
+    auto sA_layout = coalesce(tile_to_shape(
         smem_atom,
         make_shape(
-            size<0>(cta_tiler),
+            size<0>(cta_tiler), // BLK_M
+            size<2>(cta_tiler), // BLK_K
+            pipeline            // PIPE
+        )
+    ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
+
+    auto sB_layout = coalesce(tile_to_shape(
+        smem_atom,
+        make_shape(
+            size<1>(cta_tiler), // BLK_N
+            size<2>(cta_tiler), // BLK_K
+            pipeline            // PIPE
+        )
+    ), make_tuple(_1{}, _1{}, _1{})); // (BLK_N, BLK_K, PIPE)
+
+    auto sR_layout_2d = coalesce(tile_to_shape(
+        smem_atom,
+        make_shape(
+            size<1>(blocks_tiler) * reconn_sz,
             size<2>(cta_tiler),
             pipeline
             )
-        );
+        ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
+    
+    auto sR_layout_4d = tiled_divide(
+        sR_layout_2d,
+        make_tile(
+            make_layout(reconn_sz),
+            make_layout(reconn_sz)
+        )
+    ); // ((R, R), BLK_N_GROUPS, BLK_K_GROUPS, PIPE)
 
     Tensor sA = make_tensor(M, sA_layout);
-    {
-        auto sA_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)), 
-                                      make_layout(size<2>(warp_atom_mnk)));
-            
-        auto a_tensor_layout = zipped_divide(take<0,2>(sA.layout()), sA_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now
+    Tensor sB = make_tensor(M, sB_layout);
+    Tensor r2d = make_tensor(M, sR_layout_2d);
+    Tensor r4d = make_tensor(M, sR_layout_4d);
 
-        auto atom_tile = make_tile(make_layout(size<0>(mma_atom1::Shape_MNK{})),
-                                   make_layout(
-                                        make_shape(size<2>(mma_atom1::Shape_MNK{}),
-                                        reconn_sz / size<2>(mma_atom1::Shape_MNK{}))
-                                        )
-                                    ); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
-        
-        auto _mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // ((ATOM_SZ_M, (ATOM_SZ_K, ATOM_RECONNECT_K)), (ATOM_M, ATOM_K))
+    int warp_idx = 3;
 
-        auto mma_atom_layout_rank1 = group<0,2>(flatten(get<0>(_mma_atom_layout)));
+    auto warp_layout = make_layout(
+        make_shape(_4{}, _2{})
+    );
 
-        auto mma_atom_layout = replace<0>(_mma_atom_layout, mma_atom_layout_rank1); // (((ATOM_SZ_M, ATOM_SZ_K), ATOM_RECONNECT_K), (ATOM_M, ATOM_K))
+    auto warp_coord = warp_layout.get_hier_coord(warp_idx);
 
-        auto mma_thr_layout = composition(mma_atom_layout, make_tile(make_tile(mma_atom1::LayoutA_TV{}, _), _)); // (((THR, THR_DATA), ATOM_RECONNECT_K), (ATOM_M, ATOM_K))
+    auto warp_atom_mn = make_shape(
+        // size<0>(cta_tiler) / size<0>(warp_layout), // WARP_ATOM_M
+        _16{},
+        size<1>(cta_tiler) / size<1>(warp_layout) // WARP_ATOM_N
+    );
 
-        // print(mma_thr_layout); print("\n");
-        auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
-                                                make_tile(
-                                                    make_layout(size<0>(warp_layout)),
-                                                    make_layout(size<2>(warp_layout))
-                                                )); // ((WARP_GROUP_M, WARP_GROUP_K), (TILE_M, TILE_K))
-        
-        // mma_thr_layout is the TV layout within a single computation block
-        // warp_blocks_layout is the layout of the computation blocks
-        auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sA.layout()));
-        Tensor sA_blocked = make_tensor(M, overall_layout);
+    print(sB); print("\n");
 
-        Tensor thr_sA = sA_blocked(
-            make_coord(make_coord(make_coord(lane_idx, _), _), _),
-            make_coord(make_coord(get<0>(warp_idx_3d), get<2>(warp_idx_3d)), _),
-            _
-        ); // (THR_DATA, ATOM_RECONNECT_K, (ATOM_M, ATOM_K), (TILE_M, TILE_K), PIPE)
+    Tensor b_atom_tiles = logical_divide(
+        sB,
+        make_tile(
+            make_layout(
+                make_shape(
+                    size<1>(warp_atom_mn), // WARP_N
+                    size<1>(warp_layout)
+                )
+            ),
+            make_layout(
+                reconn_sz
+            )
+        )
+    );
+    print(b_atom_tiles); print("\n");
 
+    Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    print(_b_warp_tensor); print("\n");
+    Tensor b_warp_tensor = make_tensor(
+        _b_warp_tensor.data(),
+        coalesce(group<0,2>(_b_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_N_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    );
+    print(b_warp_tensor); print("\n");
+    // create the group dimension for each warp
+    auto warp_group_sz = min(size<0>(b_warp_tensor), group_sz);
+    Tensor b_warp_grouped = logical_divide(
+        b_warp_tensor,
+        make_tile(make_layout(warp_group_sz))
+    ); // ((WARP_GROUP_SIZE, WAPR_N_GROUPS), RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    print(b_warp_grouped); print("\n");
 
-        Tensor thr_rA = make_tensor<half_t>(shape(thr_sA(_, _, _, _, 0)));
-        // print(thr_rA); print("\n");
-                                                       
-        // print(sA_blocked); print("\n");
-        // print(thr_sA); print("\n");
-    }
+    // auto m_warp_tiles = tiled_m(make_coord(_, get<0>(warp_coord)), _, _, _, _);
+    // print(m_warp_tiles); print("\n");
+    // Tensor m_warp = make_tensor(
+    //     m_warp_tiles.data(),
+    //     select<0,2,1,3>(m_warp_tiles.layout())
+    //     // make_layout(
+    //     //     select<0,2>(m_warp_tiles.layout()),
+    //     //     select<1,3,4>(m_warp_tiles.layout())
+    //     // )
+    // );
+    // print(m_warp); print("\n");
+    // // print(m_warp_tiles); print("\n");
 
+    // print(flat_divide(m, atom_tiles)); print("\n");
+    // print(tiled_divide(m, atom_tiles)); print("\n");
+
+    // Tensor gm = local_tile(m, make_shape(_8{}, _16{}), make_coord(10, _));
+    // print(gm); print("\n");
+    // print(gm.data() - M); print("\n");
+    return 0;
+    // TiledCopy copyR = cp_layout<uint128_t, half_t, true, true>(
+    //     _8{}, _16{}, _8{} * _32{}
+    // );
+    // print(copyR); print("\n");
+    // print(size(copyR)); print("\n");
+    // print(copyR.get_slice(0).partition_S(m(_, _, 0))); print("\n");
+    // return 0;
+    // // ezprep();
+    // // return 0;
+    
+
+    // auto blocks_tiler = make_shape(
+    //     _128{}, _1{}, _8{} // (BATCH_SZ, N_GROUPS, N_BLOCKS)
+    // );
+
+    // auto reconn_sz = _8{};
+    // auto group_sz = _128{};
+    // auto pipeline = _3{};
+
+    // auto cta_tiler = make_shape(
+    //     size<0>(blocks_tiler), // BM
+    //     size<1>(blocks_tiler) * group_sz, // BN
+    //     size<2>(blocks_tiler) * reconn_sz // BK
+    // );
+
+    // auto smem_atom = make_layout( // two rows of padded shared memory layout atom, should be replaced by swizzle
+    //     make_shape(_2{}, size<2>(cta_tiler)),
+    //     make_stride(size<2>(cta_tiler) + _8{}, _1{})
+    // );
+
+    // auto warp_layout = make_layout(
+    //     make_shape(_4{}, _2{}, _1{})
+    // );
+
+    // auto warp_atom_mnk = make_shape(
+    //     size<0>(cta_tiler) / size<0>(warp_layout), // WARP_ATOM_M
+    //     size<1>(cta_tiler) / size<1>(warp_layout), // WARP_ATOM_N
+    //     size<2>(cta_tiler) / size<2>(warp_layout)  // WARP_ATOM_K
+    // ); // A rather simple way to tile the warps
+
+    // // auto warp_atom_mnk = make_shape(_16{}, group_sz, _16{}); // the minimum sized block that each warp should work on at once
+
+    // // TiledMMA warp_mma = make_tiled_mma(SM80_16x8x8_F16F16F16F16_TN{});  // 16x8x8 TiledMMA
+    // using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
+    // using mma_atom2 = mma_atom1;
+
+    // int thread_idx = 128;
+    // int warp_idx = thread_idx / 32;
+    // int lane_idx = thread_idx % 32;
+    // auto warp_idx_3d = warp_layout.get_hier_coord(warp_idx);
+    // print(warp_idx_3d); print("\n");
+
+    // auto sA_layout = tile_to_shape(
+    //     smem_atom,
+    //     make_shape(
+    //         size<0>(cta_tiler),
+    //         size<2>(cta_tiler),
+    //         pipeline
+    //         )
+    //     );
+
+    // Tensor sA = make_tensor(M, sA_layout);
     // {
     //     auto sA_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)), 
     //                                   make_layout(size<2>(warp_atom_mnk)));
@@ -569,128 +548,175 @@ int main() {
     //     // print(thr_sA); print("\n");
     // }
 
-    auto sW_layout = tile_to_shape(
-        smem_atom,
-        make_shape(
-            size<1>(cta_tiler),
-            size<2>(cta_tiler),
-            pipeline
-            )
-        );
+    // // {
+    // //     auto sA_warp_tile = make_tile(make_layout(size<0>(warp_atom_mnk)), 
+    // //                                   make_layout(size<2>(warp_atom_mnk)));
+            
+    // //     auto a_tensor_layout = zipped_divide(take<0,2>(sA.layout()), sA_warp_tile); // ((WARP_ATOM_M, WARP_ATOM_K), (RESTM, RESTK))  ignore PIPE for now
 
-    Tensor sW = make_tensor(M, sW_layout);
-    {
-        auto sW_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
-                                      make_layout(size<2>(warp_atom_mnk)));
+    // //     auto atom_tile = make_tile(make_layout(size<0>(mma_atom1::Shape_MNK{})),
+    // //                                make_layout(
+    // //                                     make_shape(size<2>(mma_atom1::Shape_MNK{}),
+    // //                                     reconn_sz / size<2>(mma_atom1::Shape_MNK{}))
+    // //                                     )
+    // //                                 ); // the minimum sized block that a warp should handle using mma atom during the reconnection stage
+        
+    // //     auto _mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // ((ATOM_SZ_M, (ATOM_SZ_K, ATOM_RECONNECT_K)), (ATOM_M, ATOM_K))
+
+    // //     auto mma_atom_layout_rank1 = group<0,2>(flatten(get<0>(_mma_atom_layout)));
+
+    // //     auto mma_atom_layout = replace<0>(_mma_atom_layout, mma_atom_layout_rank1); // (((ATOM_SZ_M, ATOM_SZ_K), ATOM_RECONNECT_K), (ATOM_M, ATOM_K))
+
+    // //     auto mma_thr_layout = composition(mma_atom_layout, make_tile(make_tile(mma_atom1::LayoutA_TV{}, _), _)); // (((THR, THR_DATA), ATOM_RECONNECT_K), (ATOM_M, ATOM_K))
+
+    // //     // print(mma_thr_layout); print("\n");
+    // //     auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
+    // //                                             make_tile(
+    // //                                                 make_layout(size<0>(warp_layout)),
+    // //                                                 make_layout(size<2>(warp_layout))
+    // //                                             )); // ((WARP_GROUP_M, WARP_GROUP_K), (TILE_M, TILE_K))
+        
+    // //     // mma_thr_layout is the TV layout within a single computation block
+    // //     // warp_blocks_layout is the layout of the computation blocks
+    // //     auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sA.layout()));
+    // //     Tensor sA_blocked = make_tensor(M, overall_layout);
+
+    // //     Tensor thr_sA = sA_blocked(
+    // //         make_coord(make_coord(make_coord(lane_idx, _), _), _),
+    // //         make_coord(make_coord(get<0>(warp_idx_3d), get<2>(warp_idx_3d)), _),
+    // //         _
+    // //     ); // (THR_DATA, ATOM_RECONNECT_K, (ATOM_M, ATOM_K), (TILE_M, TILE_K), PIPE)
+
+
+    // //     Tensor thr_rA = make_tensor<half_t>(shape(thr_sA(_, _, _, _, 0)));
+    // //     // print(thr_rA); print("\n");
+                                                       
+    // //     // print(sA_blocked); print("\n");
+    // //     // print(thr_sA); print("\n");
+    // // }
+
+    // auto sW_layout = tile_to_shape(
+    //     smem_atom,
+    //     make_shape(
+    //         size<1>(cta_tiler),
+    //         size<2>(cta_tiler),
+    //         pipeline
+    //         )
+    //     );
+
+    // Tensor sW = make_tensor(M, sW_layout);
+    // {
+    //     auto sW_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
+    //                                   make_layout(size<2>(warp_atom_mnk)));
     
-        auto a_tensor_layout = zipped_divide(take<0,2>(sW.layout()), sW_warp_tile); // ((WARP_ATOM_N, WARP_ATOM_K), (RESTN, RESTK))  ignore PIPE for now
+    //     auto a_tensor_layout = zipped_divide(take<0,2>(sW.layout()), sW_warp_tile); // ((WARP_ATOM_N, WARP_ATOM_K), (RESTN, RESTK))  ignore PIPE for now
 
-        auto atom_tile = make_tile(make_layout(size<0>(mma_atom2::Shape_MNK{})),
-                                   make_layout(size<2>(mma_atom2::Shape_MNK{})));
+    //     auto atom_tile = make_tile(make_layout(size<0>(mma_atom2::Shape_MNK{})),
+    //                                make_layout(size<2>(mma_atom2::Shape_MNK{})));
         
-        auto mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // (ATOM_SZ, (ATOM_N, ATOM_K))
+    //     auto mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // (ATOM_SZ, (ATOM_N, ATOM_K))
 
-        auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom2::LayoutA_TV{}, _)); // ((THR, THR_DATA), (ATOM_N, ATOM_K))
+    //     auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom2::LayoutA_TV{}, _)); // ((THR, THR_DATA), (ATOM_N, ATOM_K))
 
-        auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
-                                                make_tile(
-                                                    make_layout(size<1>(warp_layout)),
-                                                    make_layout(size<2>(warp_layout))
-                                                )); // ((WARP_GROUP_N, WARP_GROUP_K), (TILE_N, TILE_K))
+    //     auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
+    //                                             make_tile(
+    //                                                 make_layout(size<1>(warp_layout)),
+    //                                                 make_layout(size<2>(warp_layout))
+    //                                             )); // ((WARP_GROUP_N, WARP_GROUP_K), (TILE_N, TILE_K))
         
-        // mma_thr_layout is the TV layout within a single computation block
-        // warp_blocks_layout is the layout of the computation blocks
-        auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sW.layout()));
+    //     // mma_thr_layout is the TV layout within a single computation block
+    //     // warp_blocks_layout is the layout of the computation blocks
+    //     auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sW.layout()));
         
-        Tensor sW_blocked = make_tensor(M, overall_layout);
+    //     Tensor sW_blocked = make_tensor(M, overall_layout);
 
-        Tensor thr_sW = sW_blocked(
-            make_coord(make_coord(lane_idx, _), _),
-            make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
-            _
-        ); // (THR_DATA, (ATOM_N, ATOM_N), (TILE_N, TILE_N), PIPE)
+    //     Tensor thr_sW = sW_blocked(
+    //         make_coord(make_coord(lane_idx, _), _),
+    //         make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
+    //         _
+    //     ); // (THR_DATA, (ATOM_N, ATOM_N), (TILE_N, TILE_N), PIPE)
 
-        // print(sW_layout); print("\n");
-        // print(sW_blocked); print("\n");
-        // print(thr_sW); print("\n");
+    //     // print(sW_layout); print("\n");
+    //     // print(sW_blocked); print("\n");
+    //     // print(thr_sW); print("\n");
 
-        // print(mma_atom::LayoutC_TV{}); print("\n");
-    }
+    //     // print(mma_atom::LayoutC_TV{}); print("\n");
+    // }
 
-    auto sR_layout = tile_to_shape(
-        smem_atom,
-        make_shape(
-            size<1>(blocks_tiler) * reconn_sz,
-            size<2>(cta_tiler),
-            pipeline
-            )
-        );
+    // auto sR_layout = tile_to_shape(
+    //     smem_atom,
+    //     make_shape(
+    //         size<1>(blocks_tiler) * reconn_sz,
+    //         size<2>(cta_tiler),
+    //         pipeline
+    //         )
+    //     );
     
-    Tensor sR = make_tensor(M, sR_layout);
-    {
-        auto sR_warp_tile = make_tile(make_layout(reconn_sz), 
-                                      make_layout(size<2>(warp_atom_mnk)));
+    // Tensor sR = make_tensor(M, sR_layout);
+    // {
+    //     auto sR_warp_tile = make_tile(make_layout(reconn_sz), 
+    //                                   make_layout(size<2>(warp_atom_mnk)));
     
-        auto a_tensor_layout = zipped_divide(take<0,2>(sR.layout()), sR_warp_tile); // ((WARP_ATOM_N, WARP_ATOM_K), (RESTN, RESTK))  ignore PIPE for now
+    //     auto a_tensor_layout = zipped_divide(take<0,2>(sR.layout()), sR_warp_tile); // ((WARP_ATOM_N, WARP_ATOM_K), (RESTN, RESTK))  ignore PIPE for now
 
-        auto atom_tile = make_tile(make_layout(
-                                        make_shape(
-                                            size<1>(mma_atom1::Shape_MNK{}),  // ATOM_SZ_N
-                                            reconn_sz / size<1>(mma_atom1::Shape_MNK{})  // ATOM_RECONN_N
-                                            )
-                                        ),
-                                   make_layout(
-                                        make_shape(
-                                            size<2>(mma_atom1::Shape_MNK{}),  // ATOM_SZ_K
-                                            reconn_sz / size<2>(mma_atom1::Shape_MNK{})  // ATOM_RECONN_K
-                                            )
-                                        )
-                                    ); // For the tiling that has to be done within one single reconnection matrix
+    //     auto atom_tile = make_tile(make_layout(
+    //                                     make_shape(
+    //                                         size<1>(mma_atom1::Shape_MNK{}),  // ATOM_SZ_N
+    //                                         reconn_sz / size<1>(mma_atom1::Shape_MNK{})  // ATOM_RECONN_N
+    //                                         )
+    //                                     ),
+    //                                make_layout(
+    //                                     make_shape(
+    //                                         size<2>(mma_atom1::Shape_MNK{}),  // ATOM_SZ_K
+    //                                         reconn_sz / size<2>(mma_atom1::Shape_MNK{})  // ATOM_RECONN_K
+    //                                         )
+    //                                     )
+    //                                 ); // For the tiling that has to be done within one single reconnection matrix
         
-        auto _mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // (((ATOM_SZ_N, ATOM_RECONN_N), (ATOM_SZ_K, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
-        // print(_mma_atom_layout); print("\n");
-        auto mma_atom_layout_rank1_flattened = flatten(get<0>(_mma_atom_layout));
-        auto mma_atom_layout_rank1 = make_layout(select<0,2>(mma_atom_layout_rank1_flattened), select<1,3>(mma_atom_layout_rank1_flattened));
-        // print(mma_atom_layout_rank1); print("\n");
-        auto mma_atom_layout = replace<0>(_mma_atom_layout, mma_atom_layout_rank1); // (((ATOM_SZ_N, ATOM_SZ_K), (ATOM_RECONN_N, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
-        auto mma_thr_layout = composition(mma_atom_layout, make_tile(make_tile(mma_atom1::LayoutB_TV{}, _), _)); // (((THR, THR_DATA), (ATOM_RECONN_N, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
-        // print(mma_thr_layout); print("\n");
+    //     auto _mma_atom_layout = zipped_divide(get<0>(a_tensor_layout), atom_tile); // (((ATOM_SZ_N, ATOM_RECONN_N), (ATOM_SZ_K, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
+    //     // print(_mma_atom_layout); print("\n");
+    //     auto mma_atom_layout_rank1_flattened = flatten(get<0>(_mma_atom_layout));
+    //     auto mma_atom_layout_rank1 = make_layout(select<0,2>(mma_atom_layout_rank1_flattened), select<1,3>(mma_atom_layout_rank1_flattened));
+    //     // print(mma_atom_layout_rank1); print("\n");
+    //     auto mma_atom_layout = replace<0>(_mma_atom_layout, mma_atom_layout_rank1); // (((ATOM_SZ_N, ATOM_SZ_K), (ATOM_RECONN_N, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
+    //     auto mma_thr_layout = composition(mma_atom_layout, make_tile(make_tile(mma_atom1::LayoutB_TV{}, _), _)); // (((THR, THR_DATA), (ATOM_RECONN_N, ATOM_RECONN_K)), (ATOM_N, ATOM_K))
+    //     // print(mma_thr_layout); print("\n");
 
-        // auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_N, ATOM_K))
+    //     // auto mma_thr_layout = composition(mma_atom_layout, make_tile(mma_atom1::LayoutB_TV{}, _)); // ((THR, THR_DATA), (ATOM_N, ATOM_K))
 
-        auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
-                                                make_tile(
-                                                    make_layout(size<1>(warp_layout)),
-                                                    make_layout(size<2>(warp_layout))
-                                                )); // ((WARP_GROUP_N, WARP_GROUP_K), (TILE_N, TILE_K))
-        auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sR.layout()));
-        // print(overall_layout); print("\n");
+    //     auto warp_blocks_layout = zipped_divide(get<1>(a_tensor_layout),
+    //                                             make_tile(
+    //                                                 make_layout(size<1>(warp_layout)),
+    //                                                 make_layout(size<2>(warp_layout))
+    //                                             )); // ((WARP_GROUP_N, WARP_GROUP_K), (TILE_N, TILE_K))
+    //     auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sR.layout()));
+    //     // print(overall_layout); print("\n");
 
-        Tensor sR_blocked = make_tensor(M, overall_layout);
-        Tensor thr_sR = sR_blocked(
-            make_coord(make_coord(make_coord(lane_idx, _), _), _),
-            make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
-            _
-        ); // (THR_DATA, (ATOM_RECONN_N, ATOM_RECONN_K), (ATOM_N, ATOM_K), (TILE_N, TILE_K), PIPE)
-        // print(thr_sR); print("\n");
+    //     Tensor sR_blocked = make_tensor(M, overall_layout);
+    //     Tensor thr_sR = sR_blocked(
+    //         make_coord(make_coord(make_coord(lane_idx, _), _), _),
+    //         make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
+    //         _
+    //     ); // (THR_DATA, (ATOM_RECONN_N, ATOM_RECONN_K), (ATOM_N, ATOM_K), (TILE_N, TILE_K), PIPE)
+    //     // print(thr_sR); print("\n");
         
-        // // mma_thr_layout is the TV layout within a single computation block
-        // // warp_blocks_layout is the layout of the computation blocks
-        // auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sW.layout()));
+    //     // // mma_thr_layout is the TV layout within a single computation block
+    //     // // warp_blocks_layout is the layout of the computation blocks
+    //     // auto overall_layout = make_layout(mma_thr_layout, warp_blocks_layout, layout<2>(sW.layout()));
         
-        // Tensor sW_blocked = make_tensor(M, overall_layout);
+    //     // Tensor sW_blocked = make_tensor(M, overall_layout);
 
-        // Tensor thr_sW = sW_blocked(
-        //     make_coord(make_coord(lane_idx, _), _),
-        //     make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
-        //     _
-        // ); // (THR_DATA, (ATOM_N, ATOM_N), (TILE_N, TILE_N), PIPE)
+    //     // Tensor thr_sW = sW_blocked(
+    //     //     make_coord(make_coord(lane_idx, _), _),
+    //     //     make_coord(make_coord(get<1>(warp_idx_3d), get<2>(warp_idx_3d)), _),
+    //     //     _
+    //     // ); // (THR_DATA, (ATOM_N, ATOM_N), (TILE_N, TILE_N), PIPE)
 
-        // print(sW_layout); print("\n");
-        // print(sW_blocked); print("\n");
-        // print(thr_sW); print("\n");
+    //     // print(sW_layout); print("\n");
+    //     // print(sW_blocked); print("\n");
+    //     // print(thr_sW); print("\n");
 
-        // print(mma_atom::LayoutC_TV{}); print("\n");
+    //     // print(mma_atom::LayoutC_TV{}); print("\n");
     }
 
     // auto sB_warp_tile = make_tile(make_layout(size<1>(warp_atom_mnk)), 
@@ -859,4 +885,4 @@ int main() {
     // Tensor gR = local_tile(mR, r_tiler, make_coord(make_tuple(0, _0{}), make_tuple(_, _0{})));
 
     // print(gR.layout()); print("\n");
-}
+// }

@@ -27,30 +27,37 @@ endif ()
 if(DEFINED ENV{CUTLASS_DIR})
     set(CUTLASS_DIR $ENV{CUTLASS_DIR})
 else()
-    message(STATUS "Environment variable CUTLASS_DIR is not set. Cloning from GitHub...")
-    execute_process(
-        COMMAND git clone https://github.com/NVIDIA/cutlass.git ${CMAKE_BINARY_DIR}/cutlass
-        RESULT_VARIABLE GIT_CLONE_RESULT
-    )
-    if(NOT GIT_CLONE_RESULT EQUAL "0")
-        message(FATAL_ERROR "Failed to clone CUTLASS repository")
-    endif()
     set(CUTLASS_DIR ${CMAKE_BINARY_DIR}/cutlass)
+    if(NOT EXISTS ${CUTLASS_DIR})
+        message(STATUS "Environment variable CUTLASS_DIR is not set. Cloning from GitHub...")
+        execute_process(
+            COMMAND git clone https://github.com/NVIDIA/cutlass.git ${CUTLASS_DIR}
+            RESULT_VARIABLE GIT_CLONE_RESULT
+        )
+        if(NOT GIT_CLONE_RESULT EQUAL "0")
+            message(FATAL_ERROR "Failed to clone CUTLASS repository")
+        endif()
+    else()
+        message(STATUS "CUTLASS repository already exists at ${CUTLASS_DIR}")
+    endif()
 endif()
 
-set(ARGPARSE_DIR $ENV{ARGPARSE_DIR})
 if(DEFINED ENV{ARGPARSE_DIR})
     set(ARGPARSE_DIR $ENV{ARGPARSE_DIR})
 else()
-    message(STATUS "Environment variable ARGPARSE_DIR is not set. Cloning from GitHub...")
-    execute_process(
-        COMMAND git clone https://github.com/p-ranav/argparse.git ${CMAKE_BINARY_DIR}/argparse
-        RESULT_VARIABLE GIT_CLONE_RESULT
-    )
-    if(NOT GIT_CLONE_RESULT EQUAL "0")
-        message(FATAL_ERROR "Failed to clone argparse repository")
-    endif()
     set(ARGPARSE_DIR ${CMAKE_BINARY_DIR}/argparse)
+    if(NOT EXISTS ${ARGPARSE_DIR})
+        message(STATUS "Environment variable ARGPARSE_DIR is not set. Cloning from GitHub...")
+        execute_process(
+            COMMAND git clone https://github.com/p-ranav/argparse.git ${ARGPARSE_DIR}
+            RESULT_VARIABLE GIT_CLONE_RESULT
+        )
+        if(NOT GIT_CLONE_RESULT EQUAL "0")
+            message(FATAL_ERROR "Failed to clone argparse repository")
+        endif()
+    else()
+        message(STATUS "argparse repository already exists at ${ARGPARSE_DIR}")
+    endif()
 endif()
 
 # List of common include directories for CUTLASS
@@ -65,6 +72,14 @@ target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
 add_executable(sparse cute_sparse.cu)
 target_include_directories(sparse PRIVATE ${COMMON_INCLUDE_DIRS})
+
+# for each .cu file in folder "playgrounds", create an executable
+file(GLOB PLAYGROUND_SOURCES "playgrounds/*.cu")
+foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})
+    get_filename_component(PLAYGROUND_NAME ${PLAYGROUND_SOURCE} NAME_WE)
+    add_executable(${PLAYGROUND_NAME} ${PLAYGROUND_SOURCE})
+    target_include_directories(${PLAYGROUND_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
+endforeach()
 
 set(dtypes_o half float)
 set(dtypes_r half float)
