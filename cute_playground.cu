@@ -295,6 +295,43 @@ void ezprep() {
 }
 
 
+template <class WARP_N, class N_GROUPS>
+CUTE_HOST_DEVICE constexpr
+auto warp_group_mapping(WARP_N warp_n, N_GROUPS n_groups) {
+    using namespace cute;
+    // would generate a layout with the size of (groups_per_warp, n_warps)
+    if constexpr (n_groups >= warp_n) {
+        // if the number of groups is greater or equal to the number of warps, then each warp will handle at least one group
+        CUTE_STATIC_ASSERT(n_groups % warp_n == 0, "Number of groups must be divisible by number of warps.");
+        return make_layout(make_shape(n_groups / warp_n, warp_n));
+    } else {
+        // if the number of groups is less than the number of warps, then a group would be handled by multiple warps
+        CUTE_STATIC_ASSERT(warp_n % n_groups == 0, "Number of warps must be divisible by number of groups.");
+        return make_layout(
+            make_shape(_1{}, make_shape(warp_n / n_groups, n_groups)),
+            make_stride(_0{}, make_stride(_0{}, _1{}))
+        );
+    }
+}
+
+template <class WARP_N, class N_GROUPS, class GROUP_SIZE>
+CUTE_HOST_DEVICE constexpr
+auto warp_in_group_mapping(WARP_N warp_n, N_GROUPS n_groups, GROUP_SIZE group_sz) {
+    using namespace cute;
+    // would generate a layout with size of (warp_responsible_size, warp_n)
+    if constexpr(n_groups >= warp_n) {
+        // if the number of groups is greater or equal to the number of warps, then each warp would handle a full group
+        return make_layout(make_shape(group_sz, warp_n), make_stride(_1{}, _0{}));
+    } else {
+        auto warp_per_group = warp_n / n_groups;
+        auto warp_responsible_size = group_sz / warp_per_group;
+        return make_layout(
+            make_shape(warp_responsible_size, make_shape(warp_per_group, n_groups)),
+            make_stride(_1{}, make_stride(warp_responsible_size, _0{}))
+        );
+    }
+}
+
 int main() {
     using namespace cute;
     // auto swizzle_atom = composition(Swizzle<1, 5>{},
@@ -372,13 +409,14 @@ int main() {
     Tensor r2d = make_tensor(M, sR_layout_2d);
     Tensor r4d = make_tensor(M, sR_layout_4d);
 
-    int warp_idx = 3;
+    int warp_idx = 14;
 
     auto warp_layout = make_layout(
-        make_shape(_4{}, _2{})
+        make_shape(_4{}, _4{})
     );
 
     auto warp_coord = warp_layout.get_hier_coord(warp_idx);
+    print(warp_coord); print("\n");
 
     auto warp_atom_mn = make_shape(
         // size<0>(cta_tiler) / size<0>(warp_layout), // WARP_ATOM_M
@@ -388,36 +426,103 @@ int main() {
 
     print(sB); print("\n");
 
+    // Tensor b_grouped = logical_divide(
+    //     sB,
+    //     make_tile(
+    //         make_layout(
+    //             group_sz
+    //         ),
+    //         make_layout(
+    //             reconn_sz
+    //         )
+    //     )
+    // ); // ((GROUP_SZ, N_GROUPS), (RECONN_SZ, N_BLOCKS), PIPELINE)
+    // print(b_grouped); print("\n");
+
+    // auto wg_mapping = warp_group_mapping(
+    //     size<1>(warp_layout),
+    //     size<1>(blocks_tiler)
+    // );
+
+    // Tensor _b_warp_group = b_grouped.compose(
+    //     make_tile(
+    //         make_tile(_, wg_mapping),
+    //         _, _
+    //     )
+    // ); // ((GROUP_SZ, (GROUP_PER_WARP, WAPR_N)), (RECONN_SZ, N_BLOCKS), PIPELINE)
+    // print(_b_warp_group); print("\n");
+
+    // Tensor b_warp_group = _b_warp_group(
+    //     make_coord(_,
+    //         make_coord(_, get<1>(warp_coord))
+    //     ), _, _
+    // ); // (GROUP_SZ, GROUP_PER_WARP, (RECONN_SZ, N_BLOCKS), PIPELINE)
+    // print(b_warp_group); print("\n");
+
+    // auto wig_mapping = warp_in_group_mapping(
+    //     size<1>(warp_layout),
+    //     size<1>(blocks_tiler),
+    //     group_sz
+    // );
+
+    // Tensor b_warp_in_group = b_warp_group.compose(make_tile(wig_mapping, _, _, _)); // ((WARP_RESPONSIBLE_SIZE, WARP_N), GROUP_PER_WARP, (RECONN_SZ, N_BLOCKS), PIPELINE)
+    // print(b_warp_in_group);print("\n");
+
+    // Tensor b_warp_tile = b_warp_in_group(
+    //     make_coord(_, get<1>(warp_coord)),
+    //     _, (_, _), _
+    // ); // (WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+
+    // print(b_warp_tile); print("\n");
+    
     Tensor b_atom_tiles = logical_divide(
         sB,
         make_tile(
             make_layout(
-                make_shape(
-                    size<1>(warp_atom_mn), // WARP_N
-                    size<1>(warp_layout)
-                )
+                group_sz
             ),
             make_layout(
                 reconn_sz
             )
         )
-    );
+    ).compose( // ((GROUP_SZ, N_GROUPS), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_tile(
+            make_tile(_,
+                warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))
+            ), _, _
+        )
+    )( // ((GROUP_SZ, (GROUP_PER_WARP, WAPR_N)), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_coord(_,
+            make_coord(_, get<1>(warp_coord))
+        ), _, _
+    ).compose( // (GROUP_SZ, GROUP_PER_WARP, (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_tile(
+            warp_in_group_mapping(
+                size<1>(warp_layout),
+                size<1>(blocks_tiler),
+                group_sz
+            ), _, _, _)
+    )( // ((WARP_RESPONSIBLE_SIZE, WARP_N), GROUP_PER_WARP, (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_coord(_, get<1>(warp_coord)),
+        _, make_coord(_, _), _
+    );  // (WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
     print(b_atom_tiles); print("\n");
 
-    Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    print(_b_warp_tensor); print("\n");
-    Tensor b_warp_tensor = make_tensor(
-        _b_warp_tensor.data(),
-        coalesce(group<0,2>(_b_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_N_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    );
-    print(b_warp_tensor); print("\n");
-    // create the group dimension for each warp
-    auto warp_group_sz = min(size<0>(b_warp_tensor), group_sz);
-    Tensor b_warp_grouped = logical_divide(
-        b_warp_tensor,
-        make_tile(make_layout(warp_group_sz))
-    ); // ((WARP_GROUP_SIZE, WAPR_N_GROUPS), RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    print(b_warp_grouped); print("\n");
+
+    // Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    // print(_b_warp_tensor); print("\n");
+    // Tensor b_warp_tensor = make_tensor(
+    //     _b_warp_tensor.data(),
+    //     coalesce(group<0,2>(_b_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_N_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    // );
+    // print(b_warp_tensor); print("\n");
+    // // create the group dimension for each warp
+    // auto warp_group_sz = min(size<0>(b_warp_tensor), group_sz);
+    // Tensor b_warp_grouped = logical_divide(
+    //     b_warp_tensor,
+    //     make_tile(make_layout(warp_group_sz))
+    // ); // ((WARP_GROUP_SIZE, WAPR_N_GROUPS), RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    // print(b_warp_grouped); print("\n");
 
     // auto m_warp_tiles = tiled_m(make_coord(_, get<0>(warp_coord)), _, _, _, _);
     // print(m_warp_tiles); print("\n");
