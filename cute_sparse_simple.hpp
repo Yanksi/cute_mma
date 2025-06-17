@@ -144,23 +144,14 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             pipeline
             )
         ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
-    
-    auto sR_layout_4d = tiled_divide(
-        sR_layout_2d,
-        make_tile(
-            make_layout(reconn_sz),
-            make_layout(reconn_sz)
-        )
-    ); // ((R, R), BLK_N_GROUPS, BLK_K_GROUPS, PIPE)
 
     // Shared memory buffers
     __shared__ half smemA[cosize_v<decltype(sA_layout)>];
-    __shared__ half smemR[cosize_v<decltype(sR_layout_4d)>];
+    __shared__ half smemR[cosize_v<decltype(sR_layout_2d)>];
     __shared__ half smemB[cosize_v<decltype(sB_layout)>];
 
     Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout); // (BLK_M, BLK_K, PIPE)
     Tensor sR2d = make_tensor(make_smem_ptr(smemR), sR_layout_2d); // (GROUP * R, BLOCK * R, PIPE)
-    Tensor sR4d = make_tensor(make_smem_ptr(smemR), sR_layout_4d); // ((R, R), BLK_N_GROUPS, BLK_K_GROUPS, PIPE)
     Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout); // (BLK_N, BLK_K, PIPE)
 
     // Full and Tiled Tensors
@@ -242,7 +233,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     );
 
 
-    Tensor b_atom_tiles = logical_divide(
+    Tensor b_warp_tensor = logical_divide(
         sB,
         make_tile(
             make_layout(
@@ -274,28 +265,24 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         _, make_coord(_, _), _
     );  // (WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
-    Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    Tensor b_warp_tensor = make_tensor(
-        _b_warp_tensor.data(),
-        coalesce(group<0,2>(_b_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_N_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    );
 
-    // create the group dimension for each warp
-    auto warp_group_sz = min(size<0>(b_warp_tensor), group_size);
-    Tensor b_warp_grouped = logical_divide(
-        b_warp_tensor,
-        make_tile(make_layout(warp_group_sz))
-    ); // ((WARP_GROUP_SIZE, WAPR_N_GROUPS), RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    Tensor r_warp_tensor = logical_divide(
+        sR2d,
+        make_tile(
+            make_layout(reconn_sz),
+            make_layout(reconn_sz)
+        )
+    ).compose( // ((R, BLK_N_GROUPS), (R, BLOCKS_ALONG_K), PIPELINE)
+        make_tile(
+            make_tile(_, warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))),
+            _, _
+        )
+    )( // ((R, (GROUP_PER_WARP, WAPR_N)), (R, BLOCKS_ALONG_K), PIPELINE)
+        make_coord(_, make_coord(_, get<1>(warp_coord))),
+        make_coord(_, _), _
+    ); // (R, GROUP_PER_WARP, R, BLOCKS_ALONG_K, PIPELINE)
 
-
-    auto r_warp_group_layout = r_layout_mode1(size<1>(warp_layout), size<1>(sR4d));
-    Tensor r_warp_tensor = sR4d.compose(make_tile(_, r_warp_group_layout));
-
-    auto _r_warp_layout = replace<1>(sR4d, r_layout_mode1); // ((RECONN_SZ, RECONN_SZ), (WARP_N, GROUPS_PER_WARP), BLOCKS, PIPELINE)
-    auto r_warp_layout = flatten(select<0, 2, 1, 3>(_r_warp_layout)); // (RECONN_SZ, RECONN_SZ, BLOCKS, WARP_N, GROUPS_PER_WARP, PIPELINE)
-    CUTE_STATIC_ASSERT_V(size<4>(r_warp_layout) == Int<1>{}); // TODO: for now, suppose each warp would only handle one group, then ignore the group dimension
-    Tensor sR_warp_atom = make_tensor(make_smem_ptr(smemR), select<0, 1, 2, 3, 5>(r_warp_layout)); // (RECONN_SZ, RECONN_SZ, BLOCKS, WARP_N, GROUPS_PER_WARP, PIPELINE)
-
+    CUTE_STATIC_ASSERT_V(size<1>(b_warp_tensor) == size<1>(r_warp_tensor));
 
     Tensor gC_warp_all = flat_divide(gC, gC_warp_tile); // (WARP_SIZE_M, WARP_SIZE_N, WARP_M, WARP_N)
     Tensor gC_warp = gC_warp_all(_, _, get<0>(warp_coord), get<1>(warp_coord)); // (WARP_SIZE_M, WARP_SIZE_N)
