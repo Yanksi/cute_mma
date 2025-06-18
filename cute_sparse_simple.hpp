@@ -233,7 +233,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     );
 
 
-    Tensor b_warp_tensor = logical_divide(
+    Tensor b_atom_tiles = logical_divide(
         sB,
         make_tile(
             make_layout(
@@ -245,26 +245,18 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         )
     ).compose( // ((GROUP_SZ, N_GROUPS), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
         make_tile(
-            make_tile(_,
+            make_tile(
+                warp_in_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler), group_sz),
                 warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))
             ), _, _
         )
-    )( // ((GROUP_SZ, (GROUP_PER_WARP, WAPR_N)), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
-        make_coord(_,
+    )( // (((WARP_RESPONSIBLE_SIZE, WARP_N), (GROUP_PER_WARP, WAPR_N)), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_coord(
+            make_coord(_, get<1>(warp_coord)),
             make_coord(_, get<1>(warp_coord))
-        ), _, _
-    ).compose( // (GROUP_SZ, GROUP_PER_WARP, (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
-        make_tile(
-            warp_in_group_mapping(
-                size<1>(warp_layout),
-                size<1>(blocks_tiler),
-                group_sz
-            ), _, _, _)
-    )( // ((WARP_RESPONSIBLE_SIZE, WARP_N), GROUP_PER_WARP, (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
-        make_coord(_, get<1>(warp_coord)),
-        _, make_coord(_, _), _
-    );  // (WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-
+        ),
+        make_coord(_, _), _
+    ); // (WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
     Tensor r_warp_tensor = logical_divide(
         sR2d,
@@ -284,8 +276,39 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
     CUTE_STATIC_ASSERT_V(size<1>(b_warp_tensor) == size<1>(r_warp_tensor));
 
-    Tensor gC_warp_all = flat_divide(gC, gC_warp_tile); // (WARP_SIZE_M, WARP_SIZE_N, WARP_M, WARP_N)
-    Tensor gC_warp = gC_warp_all(_, _, get<0>(warp_coord), get<1>(warp_coord)); // (WARP_SIZE_M, WARP_SIZE_N)
+    Tensor _gC_warp_tensor = logical_divide(
+        gC,
+        make_tile(
+            make_layout(
+                make_shape(
+                    size<0>(warp_atom_mn), // WARP_M
+                    size<0>(warp_layout)
+                )
+            ),
+            make_layout(
+                group_sz
+            )
+        )
+    ).compose( // (((WARP_ATOM_M, WAPRS_ALONG_M), REST_M), (GROUP_SZ, N_GROUPS))
+        make_tile(
+            _,
+            make_tile(
+                warp_in_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler), group_sz),
+                warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))
+            )
+        )
+    )( // (((WARP_ATOM_M, WAPRS_ALONG_M), REST_M), ((WARP_RESPONSIBLE_SIZE, WARP_N), (GROUP_PER_WARP, WAPR_N)))
+        make_coord(make_coord(_, get<0>(warp_coord)), _),
+        make_coord(
+            make_coord(_, get<1>(warp_coord)),
+            make_coord(_, get<1>(warp_coord))
+        )
+    ); // (WARP_ATOM_M, REST_M, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
+
+    Tensor gC_warp_tensor = make_tensor(
+        _gC_warp_tensor.data(),
+        coalesce(group<0,2>(_gC_warp_tensor.layout()), Step<_1,_1,_1>{})
+    ); // (WARP_M_REGION, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
 
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
