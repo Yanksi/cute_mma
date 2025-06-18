@@ -434,42 +434,45 @@ int main() {
         size<1>(cta_tiler) / size<1>(warp_layout) // WARP_ATOM_N
     );
 
-    Tensor gC_warp_tensor = logical_divide(
-        gC,
+    Tensor b_atom_tiles = tiled_divide(
+        sB,
         make_tile(
-            make_layout(
-                make_shape(
-                    size<0>(warp_atom_mn), // WARP_M
-                    size<0>(warp_layout)
-                )
-            ),
             make_layout(
                 group_sz
+            ),
+            make_layout(
+                reconn_sz
             )
         )
-    ).compose( // (((WARP_ATOM_M, WAPRS_ALONG_M), REST_M), (GROUP_SZ, N_GROUPS))
+    ).compose( // ((GROUP_SZ, RECONN_SZ), N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
         make_tile(
-            _,
             make_tile(
-                warp_in_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler), group_sz),
-                warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))
-            )
+                warp_in_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler), group_sz), _
+            ),
+            warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler)), _, _
         )
-    )( // (((WARP_ATOM_M, WAPRS_ALONG_M), REST_M), ((WARP_RESPONSIBLE_SIZE, WARP_N), (GROUP_PER_WARP, WAPR_N)))
-        make_coord(make_coord(_, get<0>(warp_coord)), _),
-        make_coord(
-            make_coord(_, get<1>(warp_coord)),
-            make_coord(_, get<1>(warp_coord))
+    )( // (((WARP_RESPONSIBLE_SIZE, WARP_N), RECONN_SZ), (GROUP_PER_WARP, WAPR_N), BLOCKS_ALONG_K, PIPELINE)
+        make_coord(make_coord(_, get<1>(warp_coord)), _),
+        make_coord(_, get<1>(warp_coord)), _, _
+    ); // (WARP_RESPONSIBLE_SIZE, RECONN_SZ, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
+
+    print(b_atom_tiles); print("\n");
+
+    Tensor r_warp_tensor = tiled_divide(
+        r2d,
+        make_tile(
+            make_layout(reconn_sz),
+            make_layout(reconn_sz)
         )
-    ); // (WARP_ATOM_M, REST_M, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
-
-    print(gC_warp_tensor); print("\n");
-
-    Tensor ggC = make_tensor(
-        gC_warp_tensor.data(),
-        coalesce(group<0,2>(gC_warp_tensor.layout()), Step<_1,_1,_1>{})
-    );
-    print(ggC); print("\n");
+    ).compose( // ((R, R), BLK_N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
+        make_tile(
+            _, warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler)),
+            _, _
+        )
+    )( // ((R, R), (GROUP_PER_WARP, WAPR_N), BLOCKS_ALONG_K, PIPELINE)
+        make_coord(_, _), make_coord(_, get<1>(warp_coord)), _, _
+    ); // (R, R, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
+    print(r_warp_tensor); print("\n");
 
 
     // Tensor _b_warp_tensor = b_atom_tiles(make_coord(make_coord(_, get<1>(warp_coord)), _), make_coord(_, _), _); // (WARP_ATOM_N, REST_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
