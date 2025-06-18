@@ -93,11 +93,6 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         size<2>(blocks_tiler) * reconn_sz         // BLK_K
     );
 
-    // auto smem_atom = make_layout( // two rows of padded shared memory layout atom, should be replaced by swizzle
-    //     make_shape(_2{}, size<2>(cta_tiler)),
-    //     make_stride(size<2>(cta_tiler) + _8{} /*padding size required for half*/, _1{})    
-    // );
-
     constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value));
 
     auto smem_atom = composition(
@@ -211,7 +206,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     int lane_idx = threadIdx.x % 32;
     auto warp_coord = warp_layout.get_hier_coord(warp_idx); // (WARP_M, WARP_N)
 
-    Tensor _a_warp_tensor = logical_divide(
+    Tensor _sA_warp_atom = logical_divide(
         sA,
         make_tile(
             make_layout(
@@ -232,13 +227,12 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         make_coord(_, _), _
     ) // (WARP_ATOM_M, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
-    Tensor a_warp_tensor = make_tensor(
-        _a_warp_tensor.data(),
-        coalesce(group<0,2>(_a_warp_tensor.layout()), Step<_1,_1,_1,_1>{}) // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    Tensor sA_warp_atom = make_tensor(
+        _sA_warp_atom.data(),
+        coalesce(group<0,2>(_sA_warp_atom.layout()), Step<_1,_1,_1,_1>{}) // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
     );
 
-
-    Tensor b_atom_tiles = tiled_divide(
+    Tensor sB_warp_atom = tiled_divide(
         sB,
         make_tile(
             make_layout(
@@ -260,7 +254,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         make_coord(_, get<1>(warp_coord)), _, _
     ); // (WARP_RESPONSIBLE_SIZE, RECONN_SZ, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
 
-    Tensor r_warp_tensor = tiled_divide(
+    Tensor sR_warp_atom = tiled_divide(
         sR2d,
         make_tile(
             make_layout(reconn_sz),
@@ -275,9 +269,9 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         make_coord(_, _), make_coord(_, get<1>(warp_coord)), _, _
     ); // (R, R, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
 
-    CUTE_STATIC_ASSERT_V(size<1>(b_warp_tensor) == size<1>(r_warp_tensor));
+    CUTE_STATIC_ASSERT_V(size<1>(sB_warp_atom) == size<1>(sR_warp_atom));
 
-    Tensor _gC_warp_tensor = logical_divide(
+    Tensor _gC_warp = logical_divide(
         gC,
         make_tile(
             make_layout(
@@ -306,36 +300,36 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         )
     ); // (WARP_ATOM_M, REST_M, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
 
-    Tensor gC_warp_tensor = make_tensor(
-        _gC_warp_tensor.data(),
-        coalesce(group<0,2>(_gC_warp_tensor.layout()), Step<_1,_1,_1>{})
+    Tensor gC_warp = make_tensor(
+        _gC_warp.data(),
+        coalesce(group<0,2>(_gC_warp.layout()), Step<_1,_1,_1>{})
     ); // (WARP_M_REGION, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
 
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
         make_layout(make_shape(_1{}, _1{})),
-        Tile<decltype(size<0>(warp_atom_mnk)), decltype(reconn_sz)>{}
+        Tile<decltype(size<0>(sA_warp_atom)), decltype(reconn_sz)>{}
     );
     
     TiledMMA single_warp_mma2 = make_tiled_mma(
         mma_atom2{},
         make_layout(make_shape(_1{}, _1{})),
-        Tile<decltype(size<0>(warp_atom_mnk)), decltype(size<1>(warp_atom_mnk))>{}
+        Tile<decltype(size<0>(sA_warp_atom)), decltype(size<0>(sB_warp_atom))>{}
     );
 
-    
 
     ThrMMA thr_mma1 = single_warp_mma1.get_slice(warp_idx);
     ThrMMA thr_mma2 = single_warp_mma2.get_slice(warp_idx);
-    Tensor tCsA = thr_mma1.partition_A(sA_warp_atom(_, _, _, get<0>(warp_coord), get<2>(warp_coord), _)); // (MMA, MMA_M, MMA_K, BLOCKS, PIPELINE)
-    Tensor tCsR = thr_mma1.partition_B(sR_warp_atom(_, _, _, get<1>(warp_coord), _)); // (MMA, MMA_N, MMA_K, BLOCKS, PIPELINE) // TODO: Group ignorance here
-    Tensor tCsB = thr_mma2.partition_B(sB_warp_atom(_, _, _, get<1>(warp_coord), get<2>(warp_coord), _)); // (MMA, MMA_N, MMA_K, BLOCKS, PIPELINE)
-    Tensor tCgC = thr_mma2.partition_C(gC_warp);
+    Tensor tCsA = thr_mma1.partition_A(sA_warp_atom); // (MMA, MMA_M, MMA_K, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tCsR = thr_mma1.partition_B(sR_warp_atom); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tCsB = thr_mma2.partition_B(sB_warp_atom); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tCgC = thr_mma2.partition_C(gC_warp); // (MMA, MMA_M, MMA_N, GROUP_PER_WARP)
 
-    Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_, _, _, _, 0)); // (MMA, MMA_M, MMA_K, BLOCKS)
-    Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_, _, _, _, 0)); // (MMA, MMA_N, MMA_K, BLOCKS)
-    Tensor tCrB = thr_mma2.make_fragment_B(tCsB(_, _, _, _, 0)); // (MMA, MMA_N, MMA_K, BLOCKS)
-    Tensor tCrC = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N)
+    Tensor tCrI = thr_mma1.partition_fragment_C(sA_warp_atom(_, _, 0, 0)); // (MMA, MMA_M, MMA_K), Fragment for storing the intermediate result of AR
+    Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_, _, _, _, 0)); // (MMA, MMA_M, MMA_K, BLOCKS_ALONG_K)
+    Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K)
+    Tensor tCrB = thr_mma2.make_fragment_B(tCsB(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K)
+    Tensor tCrC = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N, GROUP_PER_WARP)
     clear(tCrC); // Clear the accumulators
 
     int smem_pipe_read  = 0;
@@ -343,11 +337,14 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     int smem_pipe_write = K_PIPE_MAX-1;
 
     Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-    Tensor tCsR_p = tCsR(_,_,_,_,smem_pipe_read);
-    Tensor tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
+    Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
+    Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
 
     // Size of the register pipeline
     auto K_BLOCK_MAX = size<3>(tCrA);
+
+    // Number of groups for each warp
+    auto GROUP_PER_WARP = size<3>(rCrC);
 
     // PREFETCH register pipeline
     if (K_BLOCK_MAX > 1) {
@@ -357,8 +354,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
         // Prefetch the first rmem from the first k-tile
         copy(tCsA_p(_,_,_,Int<0>{}), tCrA(_,_,_,Int<0>{}));
-        copy(tCsR_p(_,_,_,Int<0>{}), tCrR(_,_,_,Int<0>{}));
-        copy(tCsB_p(_,_,_,Int<0>{}), tCrB(_,_,_,Int<0>{}));
+        copy(tCsR_p(_,_,_,_,Int<0>{}), tCrR(_,_,_,_,Int<0>{}));
+        copy(tCsB_p(_,_,_,_,Int<0>{}), tCrB(_,_,_,_,Int<0>{}));
     }
 
     // Don't need the register pipeline with the use of tensor cores
@@ -370,7 +367,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             if (k_block == K_BLOCK_MAX - 1) {
                 // Slice the smem_pipe_read smem
                 tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-                tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
+                tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
+                tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
 
                 // Commit the smem for smem_pipe_read
                 cp_async_wait<K_PIPE_MAX-2>();
@@ -380,8 +378,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             // Load A, B shmem->regs for k_block+1
             auto k_block_next = (k_block + Int<1>{}) % K_BLOCK_MAX;      // static
             copy(tCsA_p(_,_,_,k_block_next), tCrA(_,_,_,k_block_next));
-            copy(tCsR(_,_,_,k_block_next), tCrR(_,_,_,k_block_next));
-            copy(tCsB_p(_,_,_,k_block_next), tCrB(_,_,_,k_block_next));
+            copy(tCsR_p(_,_,_,_,k_block_next), tCrR(_,_,_,_,k_block_next));
+            copy(tCsB_p(_,_,_,_,k_block_next), tCrB(_,_,_,_,k_block_next));
 
             // Copy gmem to smem before computing gemm on each k-pipe
             if (k_block == 0) {
@@ -401,8 +399,13 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                 ++smem_pipe_read;
                 smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
             }
-            gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,k_block), tCrA(_,_,_,k_block));
-            gemm(single_warp_mma2, tCrA(_,_,_,k_block), tCrB(_,_,_,k_block), tCrC);
+
+            CUTE_UNROLL
+            for (int group = 0; group < GROUP_PER_WARP; ++group) {
+                clear(tCrI); // clear the accumulator for storing AR
+                gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,group,k_block),              tCrI);
+                gemm(single_warp_mma2,                tCrI, tCrB(_,_,_,group,k_block), tCrC(_,_,_,group))
+            }
         }
     }
     copy(tCrC, tCgC); // Write back the result to global memory
