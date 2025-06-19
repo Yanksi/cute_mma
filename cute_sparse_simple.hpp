@@ -66,13 +66,13 @@ auto warp_in_group_mapping(WARP_N warp_n, N_GROUPS n_groups, GROUP_SIZE group_sz
 
 template <class ProblemShape, class BlocksTiler,
           class ALayout, class TiledCopyA,
-          class RLayout, class TiledCopyR, class GroupSize,
+          class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
 void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
-                half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_size,
+                half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
                 half       *C, CLayout layout_c, WarpLayout warp_layout, Pipeline pipeline)
 {
@@ -84,16 +84,15 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     CUTE_STATIC_ASSERT_V(is_integral<decltype(size<1>(blocks_tiler))>{});
     static_assert(is_static<BlocksTiler>::value);
     CUTE_STATIC_ASSERT_V(rank(blocks_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
-    auto reconn_sz = size<2>(layout_r);
-    CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
+    // CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
     auto cta_tiler = make_shape(
         size<0>(blocks_tiler),                    // BLK_M
-        size<1>(blocks_tiler) * group_size,       // BLK_N
+        size<1>(blocks_tiler) * group_sz,       // BLK_N
         size<2>(blocks_tiler) * reconn_sz         // BLK_K
     );
 
-    constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value));
+    constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value)); // assume that the reconnect size matches up with the k of the atom
 
     auto smem_atom = composition(
           Swizzle<k_bit_width,6 - k_bit_width>{},
@@ -103,7 +102,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
           >{}
         );
     
-    CUTE_STATIC_ASSERT_V(size<2>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
+    CUTE_STATIC_ASSERT_V(size<1>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
     
     auto warp_atom_mn = make_shape(
         size<0>(cta_tiler) / size<0>(warp_layout), // BLK_M / WARP_M
@@ -225,7 +224,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             _
         ),
         make_coord(_, _), _
-    ) // (WARP_ATOM_M, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    ); // (WARP_ATOM_M, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
     Tensor sA_warp_atom = make_tensor(
         _sA_warp_atom.data(),
@@ -262,7 +261,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         )
     ).compose( // ((R, R), BLK_N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
         make_tile(
-            _, warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler))
+            _, warp_group_mapping(size<1>(warp_layout), size<1>(blocks_tiler)),
             _, _
         )
     )( // ((R, R), (GROUP_PER_WARP, WAPR_N), BLOCKS_ALONG_K, PIPELINE)
@@ -318,8 +317,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     );
 
 
-    ThrMMA thr_mma1 = single_warp_mma1.get_slice(warp_idx);
-    ThrMMA thr_mma2 = single_warp_mma2.get_slice(warp_idx);
+    ThrMMA thr_mma1 = single_warp_mma1.get_slice(lane_idx);
+    ThrMMA thr_mma2 = single_warp_mma2.get_slice(lane_idx);
     Tensor tCsA = thr_mma1.partition_A(sA_warp_atom); // (MMA, MMA_M, MMA_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tCsR = thr_mma1.partition_B(sR_warp_atom); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
     Tensor tCsB = thr_mma2.partition_B(sB_warp_atom); // (MMA, MMA_N, MMA_K, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
@@ -344,7 +343,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     auto K_BLOCK_MAX = size<3>(tCrA);
 
     // Number of groups for each warp
-    auto GROUP_PER_WARP = size<3>(rCrC);
+    auto GROUP_PER_WARP = size<3>(tCrC);
 
     // PREFETCH register pipeline
     if (K_BLOCK_MAX > 1) {
@@ -404,7 +403,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             for (int group = 0; group < GROUP_PER_WARP; ++group) {
                 clear(tCrI); // clear the accumulator for storing AR
                 gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,group,k_block),              tCrI);
-                gemm(single_warp_mma2,                tCrI, tCrB(_,_,_,group,k_block), tCrC(_,_,_,group))
+                gemm(single_warp_mma2,                tCrI, tCrB(_,_,_,group,k_block), tCrC(_,_,_,group));
             }
         }
     }

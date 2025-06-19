@@ -54,17 +54,22 @@
 #define GROUP_SIZE 256
 
 namespace cute {
-    template <>
-    struct Params <half, half> {
-        static const unsigned int bM = 256;
-        static const unsigned int bN_group = 1;
-        static const unsigned int bK_block = 2;
-        static const unsigned int bP = 3;
-        static const bool block_tiling_copy = true;
-        using warp_layout = Layout<Shape<Int<4>, Int<2>>>;
-        // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
-        // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
-    };
+  template <typename TO, typename TR>
+  struct Params {
+    static_assert(sizeof(TO) == 0, "This struct should not be used");
+  };
+
+  template <>
+  struct Params <half, half> {
+    static const unsigned int bM = 256;
+    static const unsigned int bN_group = 1;
+    static const unsigned int bK_block = 2;
+    static const unsigned int bP = 2;
+    static const bool block_tiling_copy = true;
+    using warp_layout = Layout<Shape<Int<4>, Int<2>>>;
+    // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
+    // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
+  };
 }
 
 template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
@@ -75,12 +80,12 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
   constexpr int total_elements = bm * bk;
 
   constexpr int needed_threads = total_elements / vec_width;
-  CUTE_STATIC_ASSERT(total_elements % vec_width == 0);
+  CUTE_STATIC_ASSERT(total_elements % vec_width == 0, "total number of elements shall be divisible by the vector length");
   constexpr int total_threads = mmin(_total_threads, needed_threads);
 
   constexpr int elements_per_thread = total_elements / total_threads;
-  CUTE_STATIC_ASSERT(total_elements % total_threads == 0);
-  CUTE_STATIC_ASSERT(elements_per_thread % vec_width == 0);
+  CUTE_STATIC_ASSERT(total_elements % total_threads == 0, "total number of elements shall be divisible by the number of threads using");
+  CUTE_STATIC_ASSERT(elements_per_thread % vec_width == 0, "number of elements handled by each thread should be divisible by the vector width");
   constexpr auto get_cp_width = []() {
     if constexpr (block_tiling) {
       return vec_width;
@@ -130,14 +135,16 @@ void oft_tn(int m, int n, int k,
   using CurrParams = Params<half, half>;
 
   // Define CTA tile sizes (static)
+  auto group_size = Int<GROUP_SIZE>{}; // Group size for the block tiling
+  auto reconn_sz = _8{}; // hardcoded for now, can be made dynamic later
   auto bM = Int<CurrParams::bM>{};
-  auto bN_group = Int<CurrParams::bN>{};
-  auto bK_block = Int<CurrParams::bK>{};
+  auto bN_group = Int<CurrParams::bN_group>{};
+  auto bN = bN_group * group_size;
+  auto bK_block = Int<CurrParams::bK_block>{};
+  auto bK = bK_block * reconn_sz;
   auto blocks_tiler = make_shape(bM, bN_group, bK_block);                   // (BLK_M, BLK_N, BLK_K)
   auto bP = Int<CurrParams::bP>{};  // Pipeline
-  auto group_size = Int<GROUP_SIZE>{}; // Group size for the block tiling
   int n_groups = N / group_size;
-  auto reconn_sz = _8{}; // hardcoded for now, can be made dynamic later
   auto warp_layout = typename CurrParams::warp_layout{};
 
   // Define the gmem layouts
@@ -167,12 +174,12 @@ void oft_tn(int m, int n, int k,
 
   dim3 dimBlock(size(warp_layout) * _32{});
   dim3 dimGrid(size(ceil_div(M, bM)),
-               size(ceil_div(N, bN_group * group_size)));
+               size(ceil_div(N, bN)));
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
       (prob_shape, blocks_tiler,
        A, A_layout, copyA,
-       R, R_layout, copyR, group_size,
-       B, B_layout, copy_B,
+       R, R_layout, copyR, group_size, reconn_sz,
+       B, B_layout, copyB,
        C, C_layout, warp_layout, Int<CurrParams::bP>{});
 }
 
@@ -185,7 +192,7 @@ int main(int argc, char** argv)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-n", "--n")
     .help("Number of columns in matrix B")
-    .default_value(8192)
+    .default_value(4096)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-k", "--k")
     .help("Number of columns in matrix A and rows in matrix B")
@@ -195,6 +202,14 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
+  
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::runtime_error& err) {
+    std::cout << err.what() << std::endl;
+    std::cout << program;
+    return 1;
+  }
   
   int m = program.get<int>("--m");
   int n = program.get<int>("--n");
