@@ -1,9 +1,11 @@
 #include <cute/tensor.hpp>
+#include <cute/atom/mma_atom.hpp>
 #include <iostream>
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
 #include <cublas_v2.h>
 
+#define GEMM_UNLIKELY(x) __builtin_expect(!!(x), 0)
 #define GEMM_CHECK_CUBLAS(call)                                                                   \
     do {                                                                                          \
         cublasStatus_t status = call;                                                             \
@@ -57,7 +59,7 @@ void transform_weight(
   const thrust::device_vector<half> &d_B,
   const thrust::device_vector<half> &d_R,
         thrust::device_vector<half> &d_B_transformed,
-  int group_sz, int k, int n_groups, int reconn_sz
+  int group_sz, int k, int n_groups, int reconn_sz,
   cublasHandle_t* handle
 ) {
   half alpha = 1.0;
@@ -65,7 +67,7 @@ void transform_weight(
   for (int i = 0; i < n_groups; ++i) {
     GEMM_CHECK_CUBLAS(cublasHgemmStridedBatched(
       *handle, CUBLAS_OP_T, CUBLAS_OP_N,
-      reconn_sz, group_size, reconn_sz, &alpha,
+      reconn_sz, group_sz, reconn_sz, &alpha,
       d_R.data().get() + i * reconn_sz * k, k,
       reconn_sz,
       d_B.data().get() + i * group_sz * k, k,
@@ -73,7 +75,7 @@ void transform_weight(
       &beta,
       d_B_transformed.data().get() + i * group_sz * k, k,
       reconn_sz,
-      n_groups
+      k / reconn_sz
     ));
   }
 }
@@ -84,7 +86,7 @@ void reference_impl(
   const thrust::device_vector<half> &d_B,
         thrust::device_vector<half> &d_C,
   int m, int group_size, int n_groups, int k,
-  int reconn_sz
+  int reconn_sz,
   cublasHandle_t* handle
 ) {
   half alpha = 1.0;
@@ -98,40 +100,103 @@ void reference_impl(
     );
 }
 
+void getCublasTensorOpHandle(cublasHandle_t* handle) {
+    GEMM_CHECK_CUBLAS(cublasCreate(handle));
+    GEMM_CHECK_CUBLAS(cublasSetMathMode(*handle, CUBLAS_TF32_TENSOR_OP_MATH));
+}
+
 int main(int argc, char** argv) {
+  using namespace cute;
     int k = 32;
     int reconn_sz = 8;
-    int n_groups = 2;
+    int n_groups = 8;
+    int m = 2048;
+    int group_sz = 16;
+    int n = n_groups * group_sz;
+    thrust::host_vector<half> h_A(m*k);
+    thrust::host_vector<half> h_R(n_groups*reconn_sz*k, 0);
+    thrust::host_vector<half> h_B(n*k);
+    thrust::host_vector<half> h_C(m*n, -1);
+    
+    cublasHandle_t cublas_handle;
+    getCublasTensorOpHandle(&cublas_handle);
 
-    thrust::host_vector<half> h_R(n_groups * reconn_sz * k);
-    thrust::host_vector<half> h_R_block_diag(k * k);
-
-    for (int j = 0; j < n_groups * reconn_sz * k; ++j) {
-        h_R[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
-    }
-
-    for (int j = 0; j < k * k; ++j) {
-      h_R_block_diag[j] = static_cast<half>(0.0f);
-    }
-
-    int group_id = 1;
-    construct_block_diag(
-      h_R.data(), k,
-      reconn_sz, group_id,
-      h_R_block_diag.data()
+    for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+    for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+    Tensor h_R_tensor = make_tensor(
+      h_R.data(),
+      make_layout(
+        make_shape(n_groups * reconn_sz, k),
+        LayoutRight{}
+      )
     );
 
-    for (int i = group_id * reconn_sz; i < (group_id + 1) * reconn_sz; ++i) {
-        for (int j = 0; j < k; ++j) {
-            printf("%.3f ", static_cast<float>(h_R[i * k + j]));
-        }
-        printf("\n");
+    Tensor h_R_4d = zipped_divide(
+      h_R_tensor,
+      make_tile(
+        make_layout(reconn_sz),
+        make_layout(reconn_sz)
+      )
+    );
+
+    Tensor h_B_tensor = make_tensor(
+      h_B.data(),
+      make_layout(
+        make_shape(n, k),
+        LayoutRight{}
+      )
+    );
+
+    Tensor h_B_4d = zipped_divide(
+      h_B_tensor,
+      make_tile(
+        make_layout(group_sz),
+        make_layout(reconn_sz)
+      )
+    );
+
+    for (int i = 0; i < size<1>(h_R_4d); ++i) {
+      h_R_4d(make_coord(0, 0), i) = static_cast<half>(2.0f);
+      for (int j = 1; j < reconn_sz; ++j) {
+        h_R_4d(make_coord(j, j), i) = static_cast<half>(1.0f);
+        h_R_4d(make_coord(j, 0), i) = static_cast<half>(1.0f);
+      }
     }
 
-    for (int i = 0; i < k; ++i) {
-      for (int j = 0; j < k; ++j) {
-        printf("%.3f ", static_cast<float>(h_R_block_diag[i * k + j]));
+    // for (int i = 0; i < 2 * reconn_sz; ++i) {
+    //   for (int j = 0; j < k; ++j) {
+    //     printf("%.3f ", static_cast<float>(h_R_tensor(i, j)));
+    //   }
+    //   print("\n");
+    // }
+
+    // return 0;
+
+    thrust::device_vector<half> d_A = h_A;
+    thrust::device_vector<half> d_R = h_R;
+    thrust::device_vector<half> d_B = h_B;
+    thrust::device_vector<half> d_B_transformed(n * k);
+
+    transform_weight(d_B, d_R, d_B_transformed, group_sz, k, n_groups, reconn_sz, &cublas_handle);
+
+    thrust::host_vector<half> h_B_transformed = d_B_transformed;
+    Tensor d_B_transformed_tensor = make_tensor(
+      h_B_transformed.data(),
+      h_B_4d.layout()
+    );
+
+    for (int i = 0; i < size<1>(d_B_transformed_tensor); ++i) {
+      for (int j = 0; j < group_sz; ++j) {
+        for (int k = 0; k < reconn_sz; ++k) {
+          // Check the transformation
+          float val = static_cast<float>(d_B_transformed_tensor(make_coord(j, k), i));
+          float expected_val = static_cast<float>(h_B_4d(make_coord(j, k), i)) + static_cast<float>(h_B_4d(make_coord(j, 0), i));
+          if (std::abs(val - expected_val) > 1e-3) {
+            std::cerr << "Transformation mismatch at group " << i << ", j=" << j << ", k=" << k
+                      << ": got " << val << ", expected " << expected_val << std::endl;
+            return 1;
+          }
+        }
       }
-      printf("\n");
     }
 }

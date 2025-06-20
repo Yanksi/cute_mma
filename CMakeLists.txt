@@ -79,6 +79,7 @@ foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})
     get_filename_component(PLAYGROUND_NAME ${PLAYGROUND_SOURCE} NAME_WE)
     add_executable(${PLAYGROUND_NAME} ${PLAYGROUND_SOURCE})
     target_include_directories(${PLAYGROUND_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
+    target_link_libraries(${PLAYGROUND_NAME} PRIVATE CUDA::cublas)
 endforeach()
 
 set(dtypes_o half float)
