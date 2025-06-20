@@ -47,6 +47,7 @@
 #include <cutlass/util/helper_cuda.hpp>
 
 #include <argparse/argparse.hpp>
+#include <vector>
 
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
@@ -263,24 +264,44 @@ int main(int argc, char** argv)
   thrust::device_vector<half> d_C = h_C;
   thrust::device_vector<half> d_R = h_R;
 
-  std::function<void()> test_func = [&]() {
+  std::vector<std::function<void()>> test_funcs;
+  test_funcs.push_back([&]() {
     oft_tn(m, n, k,
       d_A.data().get(), k,
       d_B.data().get(), k,
       d_R.data().get(), k,
       d_C.data().get(), n);
-  };
+  });
 
   #ifdef USE_CUBLAS
   cublasHandle_t cublas_handle;
-  if (cublas) {
-    getCublasTensorOpHandle(&cublas_handle);
-    test_func = [&]() {
-      cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
-      GEMM_CHECK_CUDA(cudaDeviceSynchronize());
-    };
-  }  
+  getCublasTensorOpHandle(&cublas_handle);
+  test_funcs.push_back([&]() {
+    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
+    GEMM_CHECK_CUDA(cudaDeviceSynchronize());
+  });
   #endif
+
+  // std::function<void()> test_func = [&]() {
+  //   oft_tn(m, n, k,
+  //     d_A.data().get(), k,
+  //     d_B.data().get(), k,
+  //     d_R.data().get(), k,
+  //     d_C.data().get(), n);
+  // };
+
+  // #ifdef USE_CUBLAS
+  // cublasHandle_t cublas_handle;
+  // if (cublas) {
+  //   getCublasTensorOpHandle(&cublas_handle);
+  //   test_func = [&]() {
+  //     cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
+  //     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
+  //   };
+  // }
+  // #endif
+
+  test_funcs[1](); // warmup
 
   return 0;
 }
