@@ -14,47 +14,6 @@
         }                                                                                         \
     } while (0)
 
-void construct_block_diag(
-  half const* R, int k,
-  int reconn_sz, int group_id,
-  half * R_diag
-) {
-  using namespace cute;
-  half const* R_curr = R + (group_id * reconn_sz) * k;
-  auto curr_group_layout = make_layout(
-    make_shape(reconn_sz, k), LayoutRight{}
-  );
-  auto block_diag_mat_layout = make_layout(
-    make_shape(k, k), LayoutRight{}
-  );
-  auto tile = make_tile(
-    make_layout(reconn_sz),
-    make_layout(reconn_sz)
-  );
-  auto curr_group_blocked = tiled_divide(curr_group_layout, tile);
-  auto curr_mat_blocked = tiled_divide(block_diag_mat_layout, tile);
-  Tensor curr_group_tensor = make_tensor(R_curr, curr_group_blocked)(_, 0, _);
-  Tensor block_diag_tensor = make_tensor(R_diag, curr_mat_blocked);
-  for (int i = 0; i < size<1>(curr_group_tensor); ++i) {
-    copy(curr_group_tensor(_, i), block_diag_tensor(_, i, i));
-  }
-}
-
-
-// cublasStatus_t cublasHgemmStridedBatched(cublasHandle_t handle,
-//                                   cublasOperation_t transa,
-//                                   cublasOperation_t transb,
-//                                   int m, int n, int k,
-//                                   const __half           *alpha,
-//                                   const __half           *A, int lda,
-//                                   long long int          strideA,
-//                                   const __half           *B, int ldb,
-//                                   long long int          strideB,
-//                                   const __half           *beta,
-//                                   __half                 *C, int ldc,
-//                                   long long int          strideC,
-//                                   int batchCount)
-
 void transform_weight(
   const thrust::device_vector<half> &d_B,
   const thrust::device_vector<half> &d_R,
@@ -80,7 +39,7 @@ void transform_weight(
   }
 }
 
-void reference_impl(
+void oft_cublas(
   const thrust::device_vector<half> &d_A,
   const thrust::device_vector<half> &d_R,
   const thrust::device_vector<half> &d_B,

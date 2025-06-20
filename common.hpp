@@ -48,11 +48,11 @@ int paddingSize<half>() {
     return 8;
 }
 
-namespace cute {
-    enum CUTE_MMA_Layout { CUTE_MMA_T, CUTE_MMA_N };
+// namespace cute {
+//     enum CUTE_MMA_Layout { CUTE_MMA_T, CUTE_MMA_N };
 
-    template <typename TO, typename TR, CUTE_MMA_Layout ALayout, CUTE_MMA_Layout BLayout>
-    struct Params {
-        static_assert(sizeof(TO) == 0, "This struct should not be used");
-    };
-}
+//     template <typename TO, typename TR, CUTE_MMA_Layout ALayout, CUTE_MMA_Layout BLayout>
+//     struct Params {
+//         static_assert(sizeof(TO) == 0, "This struct should not be used");
+//     };
+// }

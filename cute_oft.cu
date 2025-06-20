@@ -31,9 +31,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cassert>
-#include "cute_sparse_simple.hpp"
+#include "cute_oft_simple.hpp"
 #ifdef USE_CUBLAS
-#include "cublas_gemm.hpp"
+#include "cublas_oft.hpp"
 #endif
 
 #include <thrust/host_vector.h>
@@ -188,7 +188,7 @@ int main(int argc, char** argv)
   argparse::ArgumentParser program(std::string("oft"));
   program.add_argument("-m", "--m")
     .help("Number of rows in matrix A")
-    .default_value(8192)
+    .default_value(4096)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-n", "--n")
     .help("Number of columns in matrix B")
@@ -202,6 +202,13 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
+
+  #ifdef USE_CUBLAS
+  program.add_argument("--cublas")
+    .help("Benchmark cuBLAS")
+    .default_value(false)
+    .implicit_value(true);
+  #endif
   
   try {
     program.parse_args(argc, argv);
@@ -214,6 +221,11 @@ int main(int argc, char** argv)
   int m = program.get<int>("--m");
   int n = program.get<int>("--n");
   int k = program.get<int>("--k");
+
+  #ifdef USE_CUBLAS
+  bool cublas = program.get<bool>("--cublas");
+  #endif
+
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
   std::cout << "K = " << k << std::endl;
@@ -228,173 +240,47 @@ int main(int argc, char** argv)
   // initialize matrix with positive values to avoid cancellation errors
   for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
   for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+  for (int j = 0; j < n_groups * 8 * k; ++j) h_R[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<half>(-1);
   // initialize Rs to be identity matrices for easier testing
-  for (int i = 0; i < n_groups; ++i) {
-    for (int j = 0; j < k / 8; ++j) {
-      for (int u = 0; u < 8; ++u) {
-        for (int v = 0; v < 8; ++v) {
-          int curr_idx = (i * 8 + u) * k + (j * 8 + v);
-          if (u == v) {
-            h_R[curr_idx] = static_cast<half>(1.0);
-          } else {
-            h_R[curr_idx] = static_cast<half>(0.0);
-          }
-        }
-      }
-    }
-  }
+  // for (int i = 0; i < n_groups; ++i) {
+  //   for (int j = 0; j < k / 8; ++j) {
+  //     for (int u = 0; u < 8; ++u) {
+  //       for (int v = 0; v < 8; ++v) {
+  //         int curr_idx = (i * 8 + u) * k + (j * 8 + v);
+  //         if (u == v) {
+  //           h_R[curr_idx] = static_cast<half>(1.0);
+  //         } else {
+  //           h_R[curr_idx] = static_cast<half>(0.0);
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
   thrust::device_vector<half> d_A = h_A;
   thrust::device_vector<half> d_B = h_B;
   thrust::device_vector<half> d_C = h_C;
   thrust::device_vector<half> d_R = h_R;
-  oft_tn(m, n, k,
-        d_A.data().get(), k,
-        d_B.data().get(), k,
-        d_R.data().get(), k,
-        d_C.data().get(), n);
-  CUTE_CHECK_LAST();
-  
-  // #ifdef USE_CUBLAS
-  // program.add_argument("--cublas")
-  //   .help("Benchmark cuBLAS")
-  //   .default_value(false)
-  //   .implicit_value(true);
-  // #endif
 
-  // try {
-  //   program.parse_args(argc, argv);
-  // } catch (const std::runtime_error& err) {
-  //   std::cout << err.what() << std::endl;
-  //   std::cout << program;
-  //   return 1;
-  // }
+  std::function<void()> test_func = [&]() {
+    oft_tn(m, n, k,
+      d_A.data().get(), k,
+      d_B.data().get(), k,
+      d_R.data().get(), k,
+      d_C.data().get(), n);
+  };
 
-  // int m = program.get<int>("--m");
-  // int n = program.get<int>("--n");
-  // int k = program.get<int>("--k");
-  // char transA = program.get<char>("--transA");
-  // char transB = program.get<char>("--transB");
-  // int timing_iterations = program.get<int>("--timing_iterations");
-
-  // #ifdef USE_CUBLAS
-  // bool cublas = program.get<bool>("--cublas");
-  // #endif
-  
-  // cudaDeviceProp props;
-  // cudaError_t error = cudaGetDeviceProperties(&props, 0);
-  // if (error != cudaSuccess) {
-  //   std::cerr << "cudaGetDeviceProperties() returned an error: " << cudaGetErrorString(error) << std::endl;
-  //   return -1;
-  // }
-
-  // if (props.major < 8) { 
-  //   std::cout << "This example requires an Ampere GPU or newer (CC >= 80)" << std::endl;
-  //   // Return 0 so tests pass if run on unsupported architectures or CUDA Toolkits.
-  //   return 0;
-  // }
-
-  // std::cout << "M = " << m << std::endl;
-  // std::cout << "N = " << n << std::endl;
-  // std::cout << "K = " << k << std::endl;
-  // std::cout << "C = A^" << transA << " B^" << transB << std::endl;
-
-  // thrust::host_vector<CUTE_MMA_DTYPE_O> h_A(m*k);
-  // thrust::host_vector<CUTE_MMA_DTYPE_O> h_B(n*k);
-  // thrust::host_vector<CUTE_MMA_DTYPE_R> h_C(m*n);
-
-  // // initialize matrix with positive values to avoid cancellation errors
-  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<CUTE_MMA_DTYPE_O>( (rand() / double(RAND_MAX)) );
-  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<CUTE_MMA_DTYPE_O>( (rand() / double(RAND_MAX)) );
-  // for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<CUTE_MMA_DTYPE_R>(-1);
-
-  // thrust::device_vector<CUTE_MMA_DTYPE_O> d_A = h_A;
-  // thrust::device_vector<CUTE_MMA_DTYPE_O> d_B = h_B;
-  // thrust::device_vector<CUTE_MMA_DTYPE_R> d_C = h_C;
-
-  // double gflops = (2.0*m*n*k) * 1e-9;
-
-  // GPU_Clock timer;
-
-  // int ldA = 0, ldB = 0, ldC = m;
-
-  // if (toupper(transA) == 'N') {
-  //   ldA = m;
-  // } else if (toupper(transA) == 'T') {
-  //   ldA = k;
-  // } else {
-  //   assert(false);
-  // }
-
-  // if (toupper(transB) == 'N') {
-  //   ldB = k;
-  // } else if (toupper(transB) == 'T') {
-  //   ldB = n;
-  // } else {
-  //   assert(false);
-  // }
-
-  // std::function<void()> test_func = [&]() {
-  //   gemm(transA, transB, m, n, k,
-  //        d_A.data().get(), ldA,
-  //        d_B.data().get(), ldB,
-  //        d_C.data().get(), ldC);
-  // };
-
-  // #ifdef USE_CUBLAS
-  // cublasHandle_t handle;
-  // if (cublas) {
-  //   getCublasTensorOpHandle(&handle);
-  //   test_func = [&]() {
-  //     gemm_cublas(transA, transB, m, n, k,
-  //                 d_A.data().get(), ldA,
-  //                 d_B.data().get(), ldB,
-  //                 d_C.data().get(), ldC, &handle);
-  //     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
-  //   };
-  // }
-  // #endif
-
-  // // Run once
-  // #ifdef DEBUG
-  // d_C = h_C;
-  // test_func();
-  // CUTE_CHECK_LAST();
-  // thrust::host_vector<CUTE_MMA_DTYPE_R> kernel_result = d_C;
-  // double* ref_C = new double[m*n];
-  // for (int i = 0; i < m; ++i) {
-  //   for (int j = 0; j < n; ++j) {
-  //     double sum = 0;
-  //     for (int l = 0; l < k; ++l) {
-  //       double a = (transA == 'T' || transA == 't') ? h_A[i*ldA + l] : h_A[i + l*ldA];
-  //       double b = (transB == 'T' || transB == 't') ? h_B[l*ldB + j] : h_B[l + j*ldB];
-  //       sum += a * b;
-  //     }
-  //     ref_C[j*m + i] = sum;
-  //   }
-  // }
-  // double max_error = 0;
-  // for (int i = 0; i < m*n; ++i) {
-  //   double cr = (double)kernel_result[i];
-  //   double rr = ref_C[i];
-  //   max_error = std::max(max_error, std::abs((cr - rr) / rr));
-  // }
-  // printf("Max error: %e\n", max_error);
-  
-  // #endif
-  // d_C = h_C;
-  // test_func(); // warmup
-  // CUTE_CHECK_LAST();
-
-  // // Timing iterations
-  // timer.start();
-  // for (int i = 0; i < timing_iterations; ++i) {
-  //   test_func();
-  // }
-  // double cute_time = timer.seconds() / timing_iterations;
-  // CUTE_CHECK_LAST();
-  // printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+  #ifdef USE_CUBLAS
+  cublasHandle_t cublas_handle;
+  if (cublas) {
+    getCublasTensorOpHandle(&cublas_handle);
+    test_func = [&]() {
+      cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
+      GEMM_CHECK_CUDA(cudaDeviceSynchronize());
+    };
+  }  
+  #endif
 
   return 0;
 }
