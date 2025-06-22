@@ -52,7 +52,7 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
-#define GROUP_SIZE 256
+#define GROUP_SIZE 64
 
 namespace cute {
   template <typename TO, typename TR>
@@ -62,7 +62,7 @@ namespace cute {
 
   template <>
   struct Params <half, half> {
-    static const unsigned int bM = 256;
+    static const unsigned int bM = 128;
     static const unsigned int bN_group = 1;
     static const unsigned int bK_block = 2;
     static const unsigned int bP = 2;
@@ -171,7 +171,7 @@ void oft_tn(int m, int n, int k,
 
   TiledCopy copyA = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bM, bK, size(warp_layout) * _32{});
   TiledCopy copyB = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN, bK, size(warp_layout) * _32{});
-  TiledCopy copyR = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN, bK, size(warp_layout) * _32{});
+  TiledCopy copyR = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN_group * reconn_sz, bK, size(warp_layout) * _32{});
 
   dim3 dimBlock(size(warp_layout) * _32{});
   dim3 dimGrid(size(ceil_div(M, bM)),
@@ -186,18 +186,19 @@ void oft_tn(int m, int n, int k,
 
 int main(int argc, char** argv)
 {
+  using namespace cute;
   argparse::ArgumentParser program(std::string("oft"));
   program.add_argument("-m", "--m")
     .help("Number of rows in matrix A")
-    .default_value(4096)
+    .default_value(128)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-n", "--n")
     .help("Number of columns in matrix B")
-    .default_value(4096)
+    .default_value(64)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-k", "--k")
     .help("Number of columns in matrix A and rows in matrix B")
-    .default_value(4096)
+    .default_value(32)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-t", "--timing_iterations")
     .help("Number of iterations to time")
@@ -238,10 +239,40 @@ int main(int argc, char** argv)
   thrust::host_vector<half> h_R(n_groups * 8 * k); // 8 is the hardcoded reconnection size
   thrust::host_vector<half> h_C(m * n);
 
+  Tensor h_A_tensor = make_tensor(h_A.data(), make_shape(m, k), LayoutRight{});
+  Tensor h_B_tensor = make_tensor(h_B.data(), make_shape(n, k), LayoutRight{});
+  Tensor h_R_tensor = make_tensor(h_R.data(), make_shape(n_groups * 8, k), LayoutRight{});
+
+  float step_mn = 1.0f / pow(2.0f, 6);
+  float step_k = step_mn;
+  for (int i = 0; i < size<0>(h_A_tensor); ++i) {
+    for (int j = 0; j < size<1>(h_A_tensor); ++j) {
+      h_A_tensor(i, j) = static_cast<half>(step_mn * i - step_k * j);
+      // printf("%.3f ", static_cast<float>(h_A_tensor(i, j)));
+    }
+    // printf("\n");
+  }
+
+  step_mn = 1.0f / pow(2.0f, 5);
+  step_k = step_mn;
+  for (int i = 0; i < size<0>(h_B_tensor); ++i) {
+    for (int j = 0; j < size<1>(h_B_tensor); ++j) {
+      h_B_tensor(i, j) = static_cast<half>(step_mn * i - step_k * j);
+    }
+  }
+
+  step_mn = 1.0f / pow(2.0f, 4);
+  step_k = step_mn;
+  for (int i = 0; i < size<0>(h_R_tensor); ++i) {
+    for (int j = 0; j < size<1>(h_R_tensor); ++j) {
+      h_R_tensor(i, j) = static_cast<half>(step_mn * i - step_k * j);
+    }
+  }
+
   // initialize matrix with positive values to avoid cancellation errors
-  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
-  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
-  for (int j = 0; j < n_groups * 8 * k; ++j) h_R[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
+  // for (int j = 0; j < n_groups * 8 * k; ++j) h_R[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<half>(-1);
   // initialize Rs to be identity matrices for easier testing
   // for (int i = 0; i < n_groups; ++i) {
@@ -301,7 +332,20 @@ int main(int argc, char** argv)
   // }
   // #endif
 
+  test_funcs[0](); // warmup
+  CUTE_CHECK_LAST();
+  thrust::host_vector<half> h_C_result = d_C; // keep a copy of the reference result
+  d_C.assign(h_C.begin(), h_C.end()); // reset d_C to initial state
   test_funcs[1](); // warmup
-
+  thrust::host_vector<half> h_C_ref = d_C; // keep a copy of the reference result
+  for (int i = 0; i < h_C_result.size(); ++i) {
+    float ref_val = static_cast<float>(h_C_ref[i]);
+    float result_val = static_cast<float>(h_C_result[i]);
+    if (abs((ref_val - result_val) / ref_val)  > 5e-3f) {
+      printf("Mismatch at index %d: %f != %f\n", i, static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
+      return 1;
+    }
+  }
+  std::cout << "All results match!" << std::endl;
   return 0;
 }
