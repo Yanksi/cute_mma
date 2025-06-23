@@ -71,8 +71,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         size<1>(cta_tiler) / size<1>(warp_layout)  // BLK_N / WARP_N  <- the size of this shall not be changed, otherwiseit will be wasteful in terms of register usage
     ); // A rather simple way to tile the warps, the shape of the tensor that each warp should handles
 
-    using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
-    using mma_atom2 = mma_atom1;
+    
 
     constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value)); // assume that the reconnect size matches up with the k of the atom
     auto smem_atom = composition(
@@ -261,6 +260,9 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         _gC_warp.data(),
         coalesce(group<0,2>(_gC_warp.layout()), Step<_1,_1,_1>{})
     ); // (WARP_M_REGION, WARP_RESPONSIBLE_SIZE, GROUP_PER_WARP)
+
+    using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
+    using mma_atom2 = MMA_Atom<SM80_16x8x8_F32F16F16F32_TN>;
 
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
