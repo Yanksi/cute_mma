@@ -1,32 +1,6 @@
 #pragma once
 #include <cute/tensor.hpp>
 
-// template <class NWarp, class L>
-// CUTE_HOST_DEVICE constexpr
-// auto r_layout_mode1(NWarp n_warps, L layout_group) {
-//     using namespace cute;
-//     auto n_groups = size<0>(layout_group);
-//     if constexpr (n_groups >= n_warps) {
-//         // if the number of groups is greater or equal to the number of warps, then each warp will handle at least one group
-//         CUTE_STATIC_ASSERT(n_groups % n_warps == 0, "Number of groups must be divisible by number of warps.");
-//         return logical_divide(
-//             layout_group,
-//             make_shape(n_warps)
-//         );
-//     } else {
-//         // if the number of groups is less than the number of warps, then a group would be handled by multiple warps
-//         CUTE_STATIC_ASSERT(n_warps % n_groups == 0, "Number of warps must be divisible by number of groups.");
-//         auto n_warps_per_group = n_warps / n_groups;
-//         return make_layout(
-//             make_layout(
-//                 Layout<decltype(n_warps_per_group), _0>{},
-//                 layout_group
-//             ),
-//             Layout<_1, _0>{}
-//         );
-//     }
-// }
-
 template <class WARP_N, class N_GROUPS>
 CUTE_HOST_DEVICE constexpr
 auto warp_group_mapping(WARP_N warp_n, N_GROUPS n_groups) {
@@ -101,20 +75,19 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     using mma_atom2 = mma_atom1;
 
     constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value)); // assume that the reconnect size matches up with the k of the atom
-    // auto smem_atom = composition(
-    //       Swizzle<k_bit_width,6 - k_bit_width>{},
-    //       Layout<
-    //         Shape <_8, Shape <_8,  decltype(size<2>(blocks_tiler))>>,
-    //         Stride<_8, Stride<_1, _64>>
-    //       >{}
-    //     );
+    auto smem_atom = composition(
+          Swizzle<k_bit_width,6 - k_bit_width>{},
+          Layout<
+            Shape <_8, Shape <_8,  decltype(size<2>(blocks_tiler))>>,
+            Stride<_8, Stride<_1, _64>>
+          >{}
+        );
 
-    auto smem_atom = make_layout(
-        make_shape(_2{}, size<2>(cta_tiler)),
-        LayoutRight{}
-    );
+    // auto smem_atom = make_layout(
+    //     make_shape(_2{}, size<2>(cta_tiler)),
+    //     LayoutRight{}
+    // );
     CUTE_STATIC_ASSERT_V(size<1>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
-    
 
     auto sA_layout = coalesce(tile_to_shape(
         smem_atom,
@@ -331,412 +304,74 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     // Number of groups for each warp
     auto GROUP_PER_WARP = size<3>(tCrC);
 
-    // Brain dead version of the k_tile loop
-    for (int i = 0; i < k_tile_count; ++i) {
-        // Load from gmem to smem
+    CUTE_UNROLL
+    for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
         if (threadIdx.x < size(copy_a)) {
             // Only copy A if the threadIdx.x is within the range of copy_a
-            copy(copy_a, tAgA(_,_,_,i), tAsA(_,_,_,0));
+            copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
         }
         if (threadIdx.x < size(copy_r)) {
             // Only copy R if the threadIdx.x is within the range of copy_r
-            copy(copy_r, tAgR(_,_,_,i), tAsR(_,_,_,0));
+            copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
         }
         if (threadIdx.x < size(copy_b)) {
             // Only copy B if the threadIdx.x is within the range of copy_b
-            copy(copy_b, tBgB(_,_,_,i), tBsB(_,_,_,0));
+            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
         }
+        cp_async_fence();
+        --k_tile_count;
+        if (k_tile_count > 0) { ++k_tile_next; }
+    }
+
+    CUTE_NO_UNROLL
+    while (k_tile_count > -(K_PIPE_MAX - 1)) {
+        // slice the shared memory for the reading of this round
+        Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
+        Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
+        Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
+        // Issue new copy into shared memory if there's still tiles left
+        if (k_tile_count > 0) {
+            if (threadIdx.x < size(copy_a)) {
+                // Only copy A if the threadIdx.x is within the range of copy_a
+                copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+            }
+            if (threadIdx.x < size(copy_r)) {
+                // Only copy R if the threadIdx.x is within the range of copy_r
+                copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
+            }
+            if (threadIdx.x < size(copy_b)) {
+                // Only copy B if the threadIdx.x is within the range of copy_b
+                copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
+            }
+        }
+        // Wait for the tile to be read from arrives
+        cp_async_wait<K_PIPE_MAX-2>();
         __syncthreads();
-        Tensor tCsA_p = tCsA(_,_,_,_,0);
-        Tensor tCsR_p = tCsR(_,_,_,_,_,0);
-        Tensor tCsB_p = tCsB(_,_,_,_,_,0);
+
+        // Load the first block of smem to rmem
+        copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
+        copy(tCsR_p(_,_,_,_,_0{}), tCrR(_,_,_,_,_0{}));
+        copy(tCsB_p(_,_,_,_,_0{}), tCrB(_,_,_,_,_0{}));
+
+        CUTE_UNROLL
         for (int j = 0; j < K_BLOCK_MAX; ++j) {
-            // Load from smem to registers
-            copy(tCsA_p(_,_,_,j), tCrA(_,_,_,j));
-            copy(tCsR_p(_,_,_,_,j), tCrR(_,_,_,_,j));
-            copy(tCsB_p(_,_,_,_,j), tCrB(_,_,_,_,j));
+            // Load the next block
+            if (j < K_BLOCK_MAX - 1) {
+                copy(tCsA_p(_,_,_,j + _1{}), tCrA(_,_,_,j + _1{}));
+                copy(tCsR_p(_,_,_,_,j + _1{}), tCrR(_,_,_,_,j + _1{}));
+                copy(tCsB_p(_,_,_,_,j + _1{}), tCrB(_,_,_,_,j + _1{}));
+            }
             for (int group = 0; group < GROUP_PER_WARP; ++group) {
                 clear(tCrI); // clear the accumulator for storing AR
                 gemm(single_warp_mma1, tCrA(_,_,_,j), tCrR(_,_,_,group,j),              tCrI);
                 gemm(single_warp_mma2,          tCrI, tCrB(_,_,_,group,j), tCrC(_,_,_,group));
             }
         }
+        --k_tile_count;
+        ++k_tile_next;
+        smem_pipe_write = smem_pipe_read;
+        ++smem_pipe_read;
+        smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
     }
     copy(tCrC, tCgC); // Write back the result to global memory
-
-    // Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-    // Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
-    // Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);    
-
-    // // Start async loads for all pipes but the last
-    // CUTE_UNROLL
-    // for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
-    //     if (threadIdx.x < size(copy_a)) {
-    //         // Only copy A if the threadIdx.x is within the range of copy_a
-    //         copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-    //     }
-    //     if (threadIdx.x < size(copy_r)) {
-    //         // Only copy R if the threadIdx.x is within the range of copy_r
-    //         copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
-    //     }
-    //     if (threadIdx.x < size(copy_b)) {
-    //         // Only copy B if the threadIdx.x is within the range of copy_b
-    //         copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-    //     }
-    //     cp_async_fence();
-    //     // __syncthreads();
-    //     --k_tile_count;
-    //     if (k_tile_count > 0) { ++k_tile_next; }
-    // }
-
-    // // PREFETCH register pipeline
-    // if (K_BLOCK_MAX > 1) {
-    //     // Wait util our first prefetched tile is loaded in
-    //     cp_async_wait<K_PIPE_MAX-2>();
-    //     __syncthreads();
-    //     // if (threadIdx.x == 0) {
-    //     //     printf("gA:\n");
-    //     //     Tensor curr_gA = gA(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_gA); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_gA); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_gA(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     //     printf("\ngR:\n");
-    //     //     Tensor curr_gR = gR(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_gR); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_gR); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_gR(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     //     printf("\ngB:\n");
-    //     //     Tensor curr_gB = gB(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_gB); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_gB); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_gB(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-
-    //     //     // print out the content in the shared memory for debugging
-    //     //     printf("SA:\n");
-    //     //     Tensor curr_sA = sA(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_sA); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_sA); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_sA(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     //     printf("\nSR:\n");
-    //     //     Tensor curr_sR = sR(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_sR); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_sR); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_sR(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     //     printf("\nSB:\n");
-    //     //     Tensor curr_sB = sB(_, _, 0);
-    //     //     for (int i = 0; i < size<0>(curr_sB); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr_sB); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr_sB(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     // }
-    //     // __syncthreads();
-
-    //     // for (int w = 0; w < size(warp_layout); ++w) {
-    //     //     if (threadIdx.x == w * 32) {
-    //     //         printf("Warp (%d, %d):\n", get<0>(warp_coord), get<1>(warp_coord));
-    //     //         printf("sA:\n");
-    //     //         Tensor currA = sA_warp_atom(_, _, 0, 0);
-    //     //         for (int i = 0; i < size<0>(currA); ++i) {
-    //     //             for (int j = 0; j < size<1>(currA); ++j) {
-    //     //                 printf("%6.3f ", static_cast<float>(currA(i, j)));
-    //     //             }
-    //     //             printf("\n");
-    //     //         }
-    //     //         printf("\nsR:\n");
-    //     //         Tensor currR = sR_warp_atom(_, _, _, 0, 0);
-    //     //         for (int g = 0; g < size<2>(currR); ++g) {
-    //     //             printf("Group %d:\n", g);
-    //     //             for (int i = 0; i < size<0>(currR); ++i) {
-    //     //                 for (int j = 0; j < size<1>(currR); ++j) {
-    //     //                     printf("%6.3f ", static_cast<float>(currR(i, j, g)));
-    //     //                 }
-    //     //                 printf("\n");
-    //     //             }
-    //     //         }
-    //     //         printf("\nsB:\n");
-    //     //         Tensor currB = sB_warp_atom(_, _, _, 0, 0);// (WARP_RESPONSIBLE_SIZE, RECONN_SZ, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
-    //     //         for (int g = 0; g < size<2>(currB); ++g) {
-    //     //             printf("Group %d:\n", g);
-    //     //             for (int i = 0; i < size<0>(currB); ++i) {
-    //     //                 for (int j = 0; j < size<1>(currB); ++j) {
-    //     //                     printf("%6.3f ", static_cast<float>(currB(i, j, g)));
-    //     //                 }
-    //     //                 printf("\n");
-    //     //             }
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     //     __syncthreads();
-    //     // }
-    //     // if (threadIdx.x == 0) {
-    //     //     Tensor curr = sA_warp_atom(_,_,0,0);
-    //     //     for (int i = 0; i < size<0>(curr); ++i) {
-    //     //         for (int j = 0; j < size<1>(curr); ++j) {
-    //     //             printf("%6.3f ", static_cast<float>(curr(i, j)));
-    //     //         }
-    //     //         printf("\n");
-    //     //     }
-    //     // }
-    //     // __syncthreads();
-
-    //     // Prefetch the first rmem from the first k-tile
-    //     copy(tCsA_p(_,_,_,Int<0>{}), tCrA(_,_,_,Int<0>{}));
-    //     copy(tCsR_p(_,_,_,_,Int<0>{}), tCrR(_,_,_,_,Int<0>{}));
-    //     copy(tCsB_p(_,_,_,_,Int<0>{}), tCrB(_,_,_,_,Int<0>{}));
-    // }
-
-    // int accum_step = 0;
-
-    // CUTE_NO_UNROLL
-    // while (k_tile_count > -(K_PIPE_MAX - 1))
-    // {
-    //     CUTE_UNROLL
-    //     for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-    //         if (k_block == K_BLOCK_MAX - 1) {
-    //             // Slice the smem_pipe_read smem
-    //             tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-    //             tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
-    //             tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
-
-    //             // Commit the smem for smem_pipe_read
-    //             cp_async_wait<K_PIPE_MAX-2>();
-    //             __syncthreads();
-    //         }
-
-    //         if (threadIdx.x == 0) {
-    //             printf("Step: %d\n", accum_step);
-    //             printf("Read from: %d\n", smem_pipe_read);
-    //             printf("Block sA:\n");
-    //             Tensor currA = sA(_, _, smem_pipe_read);
-    //             print(currA);print("\n");
-    //             for (int i = 0; i < size<0>(currA); ++i) {
-    //                 for (int j = 0; j < size<1>(currA); ++j) {
-    //                     printf("%6.3f ", static_cast<float>(currA(i, j)));
-    //                 }
-    //                 printf("\n");
-    //             }
-    //             printf("\nBlock sR:\n");
-    //             Tensor currR = sR(_, _, smem_pipe_read);
-    //             print(currR);print("\n");
-    //             for (int i = 0; i < size<0>(currR); ++i) {
-    //                 for (int j = 0; j < size<1>(currR); ++j) {
-    //                     // printf("%03d:", &currR(i, j) - &sR(0, 0, smem_pipe_read));
-    //                     printf("%6.3f ", static_cast<float>(currR(i, j)));
-    //                 }
-    //                 printf("\n");
-    //             }
-    //             printf("\nBlock sB:\n");
-    //             Tensor currB = sB(_, _, smem_pipe_read);
-    //             print(currB);print("\n");
-    //             for (int i = 0; i < size<0>(currB); ++i) {
-    //                 for (int j = 0; j < size<1>(currB); ++j) {
-    //                     printf("%6.3f ", static_cast<float>(currB(i, j)));
-    //                 }
-    //                 printf("\n");
-    //             }
-    //         }
-    //         __syncthreads();
-
-    //         for (int w = 0; w < size(warp_layout); ++w) {
-    //             if (threadIdx.x == w * 32) {
-    //                 printf("sR:\n");// (R, R, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
-    //                 Tensor currR = sR_warp_atom(_, _, _, k_block, smem_pipe_read);
-    //                 print(currR);print("\n");
-    //                 for (int g = 0; g < size<2>(currR); ++g) {
-    //                     printf("Group %d:\n", g);
-    //                     for (int i = 0; i < size<0>(currR); ++i) {
-    //                         for (int j = 0; j < size<1>(currR); ++j) {
-    //                             // printf("%03d:", &currR(i, j, g) - &sR(0, 0, smem_pipe_read));
-    //                             printf("%6.3f ", static_cast<float>(currR(i, j, g)));
-    //                         }
-    //                         printf("\n");
-    //                     }
-    //                 }
-    //                 printf("\n");
-
-    //                 printf("Warp (%d, %d):\n", get<0>(warp_coord), get<1>(warp_coord));
-    //                 printf("sA:\n");
-    //                 Tensor currA = sA_warp_atom(_, _, k_block, smem_pipe_read);
-    //                 print(currA);print("\n");
-    //                 for (int i = 0; i < size<0>(currA); ++i) {
-    //                     for (int j = 0; j < size<1>(currA); ++j) {
-    //                         printf("%6.3f ", static_cast<float>(currA(i, j)));
-    //                     }
-    //                     printf("\n");
-    //                 }
-    //                 printf("\n");
-                    
-    //                 printf("sB:\n");
-    //                 Tensor currB = sB_warp_atom(_, _, _, k_block, smem_pipe_read);// (WARP_RESPONSIBLE_SIZE, RECONN_SZ, GROUP_PER_WARP, BLOCKS_ALONG_K, PIPELINE)
-    //                 print(currB);print("\n");
-    //                 for (int g = 0; g < size<2>(currB); ++g) {
-    //                     printf("Group %d:\n", g);
-    //                     for (int i = 0; i < size<0>(currB); ++i) {
-    //                         for (int j = 0; j < size<1>(currB); ++j) {
-    //                             printf("%6.3f ", static_cast<float>(currB(i, j, g)));
-    //                         }
-    //                         printf("\n");
-    //                     }
-    //                 }
-    //                 printf("\n");
-    //             }
-    //             __syncthreads();
-    //         }
-    //         __syncthreads();
-
-    //         // Load A, B shmem->regs for k_block+1
-    //         auto k_block_next = k_block + Int<1>{};      // static
-    //         if (k_block_next < K_BLOCK_MAX) {
-    //             copy(tCsA_p(_,_,_,k_block_next), tCrA(_,_,_,k_block_next));
-    //             copy(tCsR_p(_,_,_,_,k_block_next), tCrR(_,_,_,_,k_block_next));
-    //             copy(tCsB_p(_,_,_,_,k_block_next), tCrB(_,_,_,_,k_block_next));
-    //         }
-    //         // Copy gmem to smem before computing gemm on each k-pipe
-    //         if (k_block == 0) {
-    //             if (k_tile_count > 0) {
-    //                 // Still have tiles to process
-    //                 if (threadIdx.x < size(copy_a)) {
-    //                     // Only copy A if the threadIdx.x is within the range of copy_a
-    //                     copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
-    //                 }
-    //                 if (threadIdx.x < size(copy_r)) {
-    //                     // Only copy R if the threadIdx.x is within the range of copy_r
-    //                     copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
-    //                 }
-    //                 if (threadIdx.x < size(copy_b)) {
-    //                     // Only copy B if the threadIdx.x is within the range of copy_b
-    //                     copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
-    //                 }
-    //                 cp_async_fence();
-    //             }
-    //             // Advance the gmem tile
-    //             --k_tile_count;
-    //             if (k_tile_count > 0) { ++k_tile_next; }
-    //         }
-
-    //         // if (threadIdx.x == 32) {
-    //         //     Tensor curr_sA = sA_warp_atom(_, _, k_block, smem_pipe_read);
-    //         //     Tensor curr_sR = sR_warp_atom(_, _, _, k_block, smem_pipe_read);
-    //         //     Tensor curr_sB = sB_warp_atom(_, _, _, k_block, smem_pipe_read);
-    //         //     for (int i = 0; i < size<0>(curr_sA); ++i) {
-    //         //         for (int j = 0; j < size<1>(curr_sA); ++j) {
-    //         //             printf("%6.3f ", static_cast<float>(curr_sA(i, j)));
-    //         //         }
-    //         //         printf("\n");
-    //         //     }
-    //         //     printf("\n");
-    //         // }
-    //         // __syncthreads();
-
-    //         CUTE_UNROLL
-    //         for (int group = 0; group < GROUP_PER_WARP; ++group) {
-    //             clear(tCrI); // clear the accumulator for storing AR
-    //             gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,group,k_block),              tCrI);
-    //             gemm(single_warp_mma2,                tCrI, tCrB(_,_,_,group,k_block), tCrC(_,_,_,group));
-    //         }
-    //         accum_step += 1;
-    //     }
-    //     // Advance the smem pipe
-    //     smem_pipe_write = smem_pipe_read;
-    //     ++smem_pipe_read;
-    //     smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
-    // }
-
-    // // // PREFETCH register pipeline
-    // // if (K_BLOCK_MAX > 1) {
-    // //     // Wait util our first prefetched tile is loaded in
-    // //     cp_async_wait<K_PIPE_MAX-2>();
-    // //     __syncthreads();
-
-    // //     // Prefetch the first rmem from the first k-tile
-    // //     copy(tCsA_p(_,_,_,Int<0>{}), tCrA(_,_,_,Int<0>{}));
-    // //     copy(tCsR_p(_,_,_,_,Int<0>{}), tCrR(_,_,_,_,Int<0>{}));
-    // //     copy(tCsB_p(_,_,_,_,Int<0>{}), tCrB(_,_,_,_,Int<0>{}));
-    // // }
-
-    // // // Don't need the register pipeline with the use of tensor cores
-    // // CUTE_NO_UNROLL
-    // // while (k_tile_count > -(K_PIPE_MAX - 1))
-    // // {
-    // //     CUTE_UNROLL
-    // //     for (int k_block = 0; k_block < K_BLOCK_MAX; ++k_block) {
-    // //         if (k_block == K_BLOCK_MAX - 1) {
-    // //             // Slice the smem_pipe_read smem
-    // //             tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-    // //             tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
-    // //             tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
-
-    // //             // Commit the smem for smem_pipe_read
-    // //             cp_async_wait<K_PIPE_MAX-2>();
-    // //             __syncthreads();
-    // //         }
-
-    // //         // Load A, B shmem->regs for k_block+1
-    // //         auto k_block_next = (k_block + Int<1>{}) % K_BLOCK_MAX;      // static
-
-            
-
-    // //         copy(tCsA_p(_,_,_,k_block_next), tCrA(_,_,_,k_block_next));
-    // //         copy(tCsR_p(_,_,_,_,k_block_next), tCrR(_,_,_,_,k_block_next));
-    // //         copy(tCsB_p(_,_,_,_,k_block_next), tCrB(_,_,_,_,k_block_next));
-
-    // //         // Copy gmem to smem before computing gemm on each k-pipe
-    // //         if (k_block == 0) {
-    // //             copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
-    // //             if (threadIdx.x < size(copy_r)) {
-    // //                 copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
-    // //             }
-    // //             copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
-    // //             cp_async_fence();
-
-    // //             // Advance the gmem tile
-    // //             --k_tile_count;
-    // //             if (k_tile_count > 0) { ++k_tile_next; }
-
-    // //             // Advance the smem pipe
-    // //             smem_pipe_write = smem_pipe_read;
-    // //             ++smem_pipe_read;
-    // //             smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
-    // //         }
-
-    // //         if (threadIdx.x == 0) {
-    // //             Tensor curr_sA = sA_warp_atom(_, _, k_block, smem_pipe_read);
-    // //             Tensor curr_sR = sR_warp_atom(_, _, _, k_block, smem_pipe_read);
-    // //             Tensor curr_sB = sB_warp_atom(_, _, _, k_block, smem_pipe_read);
-    // //             for (int i = 0; i < size<0>(curr_sA); ++i) {
-    // //                 for (int j = 0; j < size<1>(curr_sA); ++j) {
-    // //                     printf("%6.3f ", static_cast<float>(curr_sA(i, j)));
-    // //                 }
-    // //                 printf("\n");
-    // //             }
-    // //             printf("\n");
-    // //         }
-    // //         __syncthreads();
-
-    // //         CUTE_UNROLL
-    // //         for (int group = 0; group < GROUP_PER_WARP; ++group) {
-    // //             clear(tCrI); // clear the accumulator for storing AR
-    // //             gemm(single_warp_mma1, tCrA(_,_,_,k_block), tCrR(_,_,_,group,k_block),              tCrI);
-    // //             gemm(single_warp_mma2,                tCrI, tCrB(_,_,_,group,k_block), tCrC(_,_,_,group));
-    // //         }
-    // //     }
-    // // }
-    // copy(tCrC, tCgC); // Write back the result to global memory
 }

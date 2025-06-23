@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cassert>
+#include <random>
 #include "cute_oft_simple.hpp"
 #ifdef USE_CUBLAS
 #include "cublas_oft.hpp"
@@ -65,7 +66,7 @@ namespace cute {
     static const unsigned int bM = 128;
     static const unsigned int bN_group = 1;
     static const unsigned int bK_block = 2;
-    static const unsigned int bP = 2;
+    static const unsigned int bP = 3;
     static const bool block_tiling_copy = true;
     using warp_layout = Layout<Shape<Int<4>, Int<2>>>;
     // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
@@ -95,7 +96,7 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
     constexpr int threads_k_size = bk / threads_along_k;
     constexpr int threads_m_size = mmax(cp_width / bk, 1);
     constexpr int threads_along_m = total_threads / threads_along_k;
-    return make_tiled_copy(Copy_Atom<UniversalCopy<copy_as_t>, ele_t>{},
+    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
                            make_layout(Shape<Int<threads_along_m>, Int<threads_along_k>>{}, LayoutRight{}),
                           //  Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
                            Layout<Shape<Int<threads_m_size>, Int<threads_k_size>>>{});
@@ -104,8 +105,8 @@ constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
     CUTE_STATIC_ASSERT(bm % cp_width == 0);
     constexpr int threads_along_m = bm / cp_width;
     constexpr int threads_along_k = total_threads / threads_along_m;
-    // return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
-    return make_tiled_copy(Copy_Atom<UniversalCopy<copy_as_t>, ele_t>{},
+    // return make_tiled_copy(Copy_Atom<UniversalCopy<copy_as_t>, ele_t>{},
+    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
                            Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
                            Layout<Shape<Int<cp_width>, _1>>{});
   }
@@ -175,7 +176,7 @@ void oft_tn(int m, int n, int k,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,
-       C, C_layout, warp_layout, Int<CurrParams::bP>{});
+       C, C_layout, warp_layout, bP);
 }
 
 int main(int argc, char** argv)
@@ -198,6 +199,10 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("-p", "--print_matrices")
+    .help("Print matrices A, B, R")
+    .default_value(false)
+    .implicit_value(true);
 
   #ifdef USE_CUBLAS
   program.add_argument("--cublas")
@@ -244,67 +249,54 @@ int main(int argc, char** argv)
     )
   );
 
-  float step_mn = 1.0f / pow(2.0f, 6);
-  float step_k = step_mn;
-  printf("A:\n");
   for (int i = 0; i < size<0>(h_A_tensor); ++i) {
     for (int j = 0; j < size<1>(h_A_tensor); ++j) {
       h_A_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
-      printf("%6.3f ", static_cast<float>(h_A_tensor(i, j)));
     }
-    printf("\n");
   }
 
-  step_mn = 1.0f / pow(2.0f, 5);
-  step_k = step_mn;
-  printf("B:\n");
   for (int i = 0; i < size<0>(h_B_tensor); ++i) {
     for (int j = 0; j < size<1>(h_B_tensor); ++j) {
       h_B_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
-      printf("%6.3f ", static_cast<float>(h_B_tensor(i, j)));
     }
-    printf("\n");
+  }
+  
+  int shuffle_idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  for (int i = 0; i < size<1>(h_R_4d); ++i) {
+    std::shuffle(std::begin(shuffle_idx), std::end(shuffle_idx), std::mt19937{std::random_device{}()});
+    for (int j = 0; j < 8; ++j) { // hardcoded reconnection size
+      // shuffle the indices to create a more complex pattern
+      h_R_4d(make_coord(j, shuffle_idx[j]), i) = static_cast<half>(1.0f);
+    }
   }
 
-  step_mn = 1.0f / pow(2.0f, 4);
-  step_k = step_mn;
-  printf("R:\n");
-  // for (int i = 0; i < size<1>(h_R_4d); ++i) {
-  //   // h_R_4d(make_coord(0, 0), i) = static_cast<half>(2.0f);
-  //   for (int j = 0; j < 8; ++j) { // hardcoded reconnection size
-  //     h_R_4d(make_coord(j, 8-j-1), i) = static_cast<half>(1.0f * (j % 2));
-  //     // h_R_4d(make_coord(j, j), i) = static_cast<half>(1.0f * (j % 2));
-  //     // h_R_4d(make_coord(j, 0), i) = static_cast<half>(1.0f);
-  //   }
-  // }
-  for (int i = 0; i < size<0>(h_R_tensor); ++i) {
-    for (int j = 0; j < size<1>(h_R_tensor); ++j) {
-      h_R_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
-      printf("%6.3f ", static_cast<float>(h_R_tensor(i, j)));
-    }
-    printf("\n");
-  }
-
-  // initialize matrix with positive values to avoid cancellation errors
-  // for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
-  // for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
-  // for (int j = 0; j < n_groups * 8 * k; ++j) h_R[j] = static_cast<half>( (rand() / double(RAND_MAX)) );
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<half>(-1);
-  // initialize Rs to be identity matrices for easier testing
-  // for (int i = 0; i < n_groups; ++i) {
-  //   for (int j = 0; j < k / 8; ++j) {
-  //     for (int u = 0; u < 8; ++u) {
-  //       for (int v = 0; v < 8; ++v) {
-  //         int curr_idx = (i * 8 + u) * k + (j * 8 + v);
-  //         if (u == v) {
-  //           h_R[curr_idx] = static_cast<half>(1.0);
-  //         } else {
-  //           h_R[curr_idx] = static_cast<half>(0.0);
-  //         }
-  //       }
-  //     }
-  //   }
-  // }
+
+  if (program.get<bool>("--print_matrices")) {
+    printf("A:\n");
+    for (int i = 0; i < size<0>(h_A_tensor); ++i) {
+      for (int j = 0; j < size<1>(h_A_tensor); ++j) {
+        printf("%6.3f ", static_cast<float>(h_A_tensor(i, j)));
+      }
+      printf("\n");
+    }
+
+    printf("R:\n");
+    for (int i = 0; i < size<0>(h_R_tensor); ++i) {
+      for (int j = 0; j < size<1>(h_R_tensor); ++j) {
+        printf("%6.3f ", static_cast<float>(h_R_tensor(i, j)));
+      }
+      printf("\n");
+    }
+
+    printf("B:\n");
+    for (int i = 0; i < size<0>(h_B_tensor); ++i) {
+      for (int j = 0; j < size<1>(h_B_tensor); ++j) {
+        printf("%6.3f ", static_cast<float>(h_B_tensor(i, j)));
+      }
+      printf("\n");
+    }
+  }
 
   thrust::device_vector<half> d_A = h_A;
   thrust::device_vector<half> d_B = h_B;
@@ -350,18 +342,24 @@ int main(int argc, char** argv)
 
   test_funcs[0](); // warmup
   CUTE_CHECK_LAST();
-  thrust::host_vector<half> h_C_result = d_C; // keep a copy of the reference result
+  thrust::host_vector<half> h_C_result = d_C;
   d_C.assign(h_C.begin(), h_C.end()); // reset d_C to initial state
   test_funcs[1](); // warmup
-  thrust::host_vector<half> h_C_ref = d_C; // keep a copy of the reference result
+  thrust::host_vector<half> h_C_ref = d_C;
+  bool check_result = true;
   for (int i = 0; i < h_C_result.size(); ++i) {
     float ref_val = static_cast<float>(h_C_ref[i]);
     float result_val = static_cast<float>(h_C_result[i]);
     if (abs((ref_val - result_val) / ref_val)  > 5e-3f) {
       printf("Mismatch at index %d: %f != %f\n", i, static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
+      check_result = false;
       // return 1;
     }
   }
-  // std::cout << "All results match!" << std::endl;
+  if (check_result) {
+    std::cout << "All results match!" << std::endl;
+  } else {
+    std::cout << "Some results do not match!" << std::endl;
+  }
   return 0;
 }
