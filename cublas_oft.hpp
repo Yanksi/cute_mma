@@ -28,7 +28,7 @@ void transform_weight(
   half beta = 0.0;
   for (int i = 0; i < n_groups; ++i) {
     GEMM_CHECK_CUBLAS(cublasHgemmStridedBatched(
-      *handle, CUBLAS_OP_T, CUBLAS_OP_N,
+      *handle, CUBLAS_OP_N, CUBLAS_OP_N,
       reconn_sz, group_sz, reconn_sz, &alpha,
       d_R.data().get() + i * reconn_sz * k, k,
       reconn_sz,
