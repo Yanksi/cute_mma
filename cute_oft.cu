@@ -212,10 +212,10 @@ int main(int argc, char** argv)
   #endif
 
   #ifdef USE_CUBLAS
-  program.add_argument("--cublas")
-    .help("Benchmark cuBLAS")
-    .default_value(false)
-    .implicit_value(true);
+  program.add_argument("--cublas_mode")
+    .help("The mode for the cublas kernel, either 'AR_W' or 'A_RW'")
+    .default_value(std::string(""))
+    .action([](const std::string& value) { return value; });
   #endif
   
   try {
@@ -229,9 +229,10 @@ int main(int argc, char** argv)
   int m = program.get<int>("--m");
   int n = program.get<int>("--n");
   int k = program.get<int>("--k");
+  int timing_iterations = program.get<int>("--timing_iterations");
 
   #ifdef USE_CUBLAS
-  bool cublas = program.get<bool>("--cublas");
+  std::string cublas_mode = program.get<std::string>("--cublas_mode");
   #endif
 
   std::cout << "M = " << m << std::endl;
@@ -359,10 +360,34 @@ int main(int argc, char** argv)
   #else
 
   double n_blocks = k / 8.0; // hardcoded reconnection size
-  double n_groups = n / GROUP_SIZE;
-  double n_flops_AR_W = (n_groups * m * k * k / n_blocks + m * n * k) * 2.0; // 2 flops per multiply-add
-  double n_flops_A_RW = (n * k * k / n_blocks + m * n * k) * 2.0; // 2 flops per multiply-add
-  
+  double base_t_flops = (double)m * n * k * 2.0 * 1e-12; // 2 flops per multiply-add
+  printf("Base TFLOPS: %.5f\n", base_t_flops);
+  double t_flops_AR_W = (((double)n_groups * m * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops; // 2 flops per multiply-add
+  double t_flops_AR_W_sparse = (((double)n_groups * m * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops * 2; // 2 flops per multiply-add
+  double t_flops_A_RW = (((double)n * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops; // 2 flops per multiply-add
+  printf("Total TFLOPS (AR_W): %.5f, (AR_W_sparse): %.5f, (A_RW): %.5f\n", t_flops_AR_W, t_flops_AR_W_sparse, t_flops_A_RW);
+
+  auto test_func = test_funcs[0];
+  #ifdef USE_CUBLAS
+  if (cublas_mode == "AR_W") {
+    test_func = test_funcs[1];
+  } else if (cublas_mode == "A_RW") {
+    test_func = test_funcs[2];
+  }
+  #endif
+  test_func(); // warmup
+  CUTE_CHECK_LAST();
+
+  // Timing iterations
+  GPU_Clock timer;
+  timer.start();
+  for (int i = 0; i < timing_iterations; ++i) {
+    test_func();
+  }
+  double time = timer.seconds() / timing_iterations;
+  CUTE_CHECK_LAST();
+  printf("TFLOPS/s (AR_W): %.2f, (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
+         t_flops_AR_W / time, t_flops_AR_W_sparse / time, t_flops_A_RW / time, time * 1000.0);
   #endif
   return 0;
 }

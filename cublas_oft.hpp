@@ -56,7 +56,7 @@ void cublas_oft(
   half beta = 0.0;
   int n = group_size * n_groups;
   if (RW_mode) {
-    printf("RW mode\n");
+    // printf("RW mode\n");
     thrust::device_vector<half> d_Bp(n * k);
     transform_weight(d_B, d_R, d_Bp, group_size, k, n_groups, reconn_sz, handle);
     GEMM_CHECK_CUBLAS(cublasHgemm(
@@ -64,7 +64,7 @@ void cublas_oft(
         n, m, k, &alpha, d_Bp.data().get(), k, d_A.data().get(), k, &beta, d_C.data().get(), n)
       );
   } else {
-    printf("AR mode\n");
+    // printf("AR mode\n");
     thrust::device_vector<half> d_AR(m * k);
     for (int i = 0; i < n_groups; ++i) {
       GEMM_CHECK_CUBLAS(cublasHgemmStridedBatched(
