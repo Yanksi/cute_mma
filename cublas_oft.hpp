@@ -49,15 +49,40 @@ void cublas_oft(
         thrust::device_vector<half> &d_C,
   int m, int group_size, int n_groups, int k,
   int reconn_sz,
-  cublasHandle_t* handle
+  cublasHandle_t* handle,
+  bool RW_mode
 ) {
   half alpha = 1.0;
   half beta = 0.0;
   int n = group_size * n_groups;
-  thrust::device_vector<half> d_Bp(n * k);
-  transform_weight(d_B, d_R, d_Bp, group_size, k, n_groups, reconn_sz, handle);
-  GEMM_CHECK_CUBLAS(cublasHgemm(
-      *handle, CUBLAS_OP_T, CUBLAS_OP_N,
-      n, m, k, &alpha, d_Bp.data().get(), k, d_A.data().get(), k, &beta, d_C.data().get(), n)
-    );
+  if (RW_mode) {
+    printf("RW mode\n");
+    thrust::device_vector<half> d_Bp(n * k);
+    transform_weight(d_B, d_R, d_Bp, group_size, k, n_groups, reconn_sz, handle);
+    GEMM_CHECK_CUBLAS(cublasHgemm(
+        *handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        n, m, k, &alpha, d_Bp.data().get(), k, d_A.data().get(), k, &beta, d_C.data().get(), n)
+      );
+  } else {
+    printf("AR mode\n");
+    thrust::device_vector<half> d_AR(m * k);
+    for (int i = 0; i < n_groups; ++i) {
+      GEMM_CHECK_CUBLAS(cublasHgemmStridedBatched(
+        *handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        reconn_sz, m, reconn_sz, &alpha,
+        d_R.data().get() + i * reconn_sz * k, k,
+        reconn_sz,
+        d_A.data().get(), k,
+        reconn_sz,
+        &beta,
+        d_AR.data().get(), k,
+        reconn_sz,
+        k / reconn_sz
+      ));
+      GEMM_CHECK_CUBLAS(cublasHgemm(
+        *handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        group_size, m, k, &alpha, d_B.data().get() + i * group_size * k, k, d_AR.data().get(), k, &beta, d_C.data().get() + i * group_size, n)
+      );
+    }
+  }
 }

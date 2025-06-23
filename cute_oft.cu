@@ -53,7 +53,11 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
+#ifdef DEBUG
 #define GROUP_SIZE 64
+#else
+#define GROUP_SIZE 256
+#endif
 
 namespace cute {
   template <typename TO, typename TR>
@@ -199,10 +203,13 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
+
+  #ifdef DEBUG
   program.add_argument("-p", "--print_matrices")
     .help("Print matrices A, B, R")
     .default_value(false)
     .implicit_value(true);
+  #endif
 
   #ifdef USE_CUBLAS
   program.add_argument("--cublas")
@@ -272,6 +279,7 @@ int main(int argc, char** argv)
 
   for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<half>(-1);
 
+  #ifdef DEBUG
   if (program.get<bool>("--print_matrices")) {
     printf("A:\n");
     for (int i = 0; i < size<0>(h_A_tensor); ++i) {
@@ -297,6 +305,7 @@ int main(int argc, char** argv)
       printf("\n");
     }
   }
+  #endif
 
   thrust::device_vector<half> d_A = h_A;
   thrust::device_vector<half> d_B = h_B;
@@ -316,30 +325,16 @@ int main(int argc, char** argv)
   cublasHandle_t cublas_handle;
   getCublasTensorOpHandle(&cublas_handle);
   test_funcs.push_back([&]() {
-    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
+    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle, false);
+    GEMM_CHECK_CUDA(cudaDeviceSynchronize());
+  });
+  test_funcs.push_back([&]() {
+    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle, true);
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
   });
   #endif
 
-  // std::function<void()> test_func = [&]() {
-  //   oft_tn(m, n, k,
-  //     d_A.data().get(), k,
-  //     d_B.data().get(), k,
-  //     d_R.data().get(), k,
-  //     d_C.data().get(), n);
-  // };
-
-  // #ifdef USE_CUBLAS
-  // cublasHandle_t cublas_handle;
-  // if (cublas) {
-  //   getCublasTensorOpHandle(&cublas_handle);
-  //   test_func = [&]() {
-  //     cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle);
-  //     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
-  //   };
-  // }
-  // #endif
-
+  #ifdef DEBUG
   test_funcs[0](); // warmup
   CUTE_CHECK_LAST();
   thrust::host_vector<half> h_C_result = d_C;
@@ -361,5 +356,13 @@ int main(int argc, char** argv)
   } else {
     std::cout << "Some results do not match!" << std::endl;
   }
+  #else
+
+  double n_blocks = k / 8.0; // hardcoded reconnection size
+  double n_groups = n / GROUP_SIZE;
+  double n_flops_AR_W = (n_groups * m * k * k / n_blocks + m * n * k) * 2.0; // 2 flops per multiply-add
+  double n_flops_A_RW = (n * k * k / n_blocks + m * n * k) * 2.0; // 2 flops per multiply-add
+  
+  #endif
   return 0;
 }
