@@ -33,25 +33,10 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
         size<0>(cta_tiler) / size<0>(warp_layout), // BLK_M / WARP_M
         size<1>(cta_tiler) / size<1>(warp_layout)  // BLK_N / WARP_N  <- the size of this shall not be changed, otherwiseit will be wasteful in terms of register usage
     ); // A rather simple way to tile the warps, the shape of the tensor that each warp should handles
-
-    
-
-    // constexpr auto k_bit_width = log_2(static_cast<unsigned int>(decltype(size<2>(blocks_tiler))::value)); // assume that the reconnect size matches up with the k of the atom
-    // auto smem_atom = composition(
-    //       Swizzle<k_bit_width,6 - k_bit_width>{},
-    //       Layout<
-    //         Shape <_8, Shape <_8,  decltype(size<2>(blocks_tiler))>>, // Hardcoding, assuming the size of the reconnect block is just 
-    //         Stride<_8, Stride<_1, _64>>
-    //       >{}
-    //     );
     
     auto smem_atom = get_smem_atom(size<2>(cta_tiler));
 
-
-    // auto smem_atom = make_layout(
-    //     make_shape(_2{}, size<2>(cta_tiler)),
-    //     LayoutRight{}
-    // );
+    
     CUTE_STATIC_ASSERT_V(size<1>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
 
     auto sA_layout = coalesce(tile_to_shape(
@@ -62,6 +47,15 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
             pipeline            // PIPE
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
+
+    // for storing the intermediate result of AR
+    auto sAR_layout = coalesce(tile_to_shape(
+        smem_atom,
+        make_shape(
+            size<0>(cta_tiler), // BLK_M
+            reconn_sz
+        )
+    ), make_tuple(_1{}, _1{})); // (BLK_M, RECONN_SZ)
 
     auto sB_layout = coalesce(tile_to_shape(
         smem_atom,
@@ -85,10 +79,12 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     __shared__ half smemA[cosize_v<decltype(sA_layout)>];
     __shared__ half smemR[cosize_v<decltype(sR_layout)>];
     __shared__ half smemB[cosize_v<decltype(sB_layout)>];
+    __shared__ half smemAR[cosize_v<decltype(sAR_layout)>];
 
     Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout); // (BLK_M, BLK_K, PIPE)
     Tensor sR = make_tensor(make_smem_ptr(smemR), sR_layout); // (GROUP * R, BLOCK * R, PIPE)
     Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout); // (BLK_N, BLK_K, PIPE)
+    Tensor sAR = make_tensor(make_smem_ptr(smemAR), sAR_layout); // (BLK_M, RECONN_SZ)
 
     // Full and Tiled Tensors
     Tensor mA = make_tensor(make_gmem_ptr(A), layout_a); // (M,K)
@@ -152,6 +148,19 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     Tensor sA_warp_atom = make_tensor(
         _sA_warp_atom.data(),
         coalesce(group<0,2>(_sA_warp_atom.layout()), Step<_1,_1,_1,_1>{}) // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    );
+
+    Tensor _sAR_warp_atom = logical_divide(
+        sAR,
+        make_tile(
+            make_layout(
+                make_shape(
+                    size(warp_atom_mn), // all warps will work together for transforming A
+                    size<0>(warp_layout)
+                )
+            ),
+            _
+        )
     );
 
     Tensor sB_warp_atom = tiled_divide(

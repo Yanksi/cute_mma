@@ -386,6 +386,8 @@ int main(int argc, char** argv)
   }
   double time = timer.seconds() / timing_iterations;
   CUTE_CHECK_LAST();
+  double theoretical_speedup = t_flops_AR_W_sparse / t_flops_AR_W;
+  printf("Theoretical speedup: %.2f\n", theoretical_speedup);
   printf("TFLOPS/s (AR_W): %.2f, (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
          t_flops_AR_W / time, t_flops_AR_W_sparse / time, t_flops_A_RW / time, time * 1000.0);
   #endif
