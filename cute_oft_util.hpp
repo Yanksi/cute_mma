@@ -46,6 +46,7 @@ auto get_smem_atom(cute::Int<_k_width>) {
     k=64: 3,3
     k=32: 2,4
     k=16: 1,5
+    k= 8: 0,6
     */
     Int<_k_width> k_width;
     CUTE_STATIC_ASSERT(k_width % 8 == 0);
