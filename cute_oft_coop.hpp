@@ -334,7 +334,8 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                 clear(tCrAR1); // clear the accumulator for storing AR
                 gemm(single_warp_mma1, tCrA(_,_,_,rmem_pipe_read), tCrR(_,_,_,group,rmem_pipe_read), tCrAR1);
                 copy(tCrAR1, tCsAR_stage1); // copy the intermediate result into shared memory
-                asm volatile("bar.sync %0, %1;"
+                // __syncthreads();
+                asm volatile("bar.sync %0, %1;\n"
                              :
                              : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
                 copy(tCsAR_stage2, tCrAR2); // load the transformed result into rmem

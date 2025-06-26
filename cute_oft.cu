@@ -54,11 +54,12 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
-#ifdef DEBUG
-#define GROUP_SIZE 64
-#else
+// #ifdef DEBUG
+// #define GROUP_SIZE 64
+// #else
+// #define GROUP_SIZE 256
+// #endif
 #define GROUP_SIZE 256
-#endif
 
 namespace cute {
   template <typename TO, typename TR>
@@ -176,6 +177,10 @@ void oft_tn(int m, int n, int k,
   dim3 dimBlock(size(warp_layout) * _32{});
   dim3 dimGrid(size(ceil_div(M, bM)),
                size(ceil_div(N, bN)));
+  #ifdef DEBUG
+  printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
+         dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
+  #endif
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
       (prob_shape, blocks_tiler,
        A, A_layout, copyA,
@@ -258,11 +263,16 @@ int main(int argc, char** argv)
     )
   );
 
+  // set a time based random seed
+  std::srand(static_cast<unsigned int>(std::time(nullptr)));
+
   for (int i = 0; i < size<0>(h_A_tensor); ++i) {
     for (int j = 0; j < size<1>(h_A_tensor); ++j) {
       h_A_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
     }
   }
+
+  printf("A(0,0): %f\n", static_cast<float>(h_A_tensor(0, 0)));
 
   for (int i = 0; i < size<0>(h_B_tensor); ++i) {
     for (int j = 0; j < size<1>(h_B_tensor); ++j) {
@@ -344,11 +354,19 @@ int main(int argc, char** argv)
   test_funcs[1](); // warmup
   thrust::host_vector<half> h_C_ref = d_C;
   bool check_result = true;
+  auto h_C_layout = make_layout(
+    make_shape(m, n),
+    LayoutRight{}
+  );
   for (int i = 0; i < h_C_result.size(); ++i) {
     float ref_val = static_cast<float>(h_C_ref[i]);
     float result_val = static_cast<float>(h_C_result[i]);
     if (abs((ref_val - result_val) / ref_val)  > 5e-3f) {
-      printf("Mismatch at index %d: %f != %f\n", i, static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
+      auto coord = h_C_layout.get_hier_coord(i);
+      printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
+             static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
+      // printf("Mismatch at index %d: %f != %
+      // printf("Mismatch at index %d: %f != %f\n", i, static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
       check_result = false;
       // return 1;
     }
