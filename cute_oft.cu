@@ -361,6 +361,11 @@ int main(int argc, char** argv)
   for (int i = 0; i < h_C_result.size(); ++i) {
     float ref_val = static_cast<float>(h_C_ref[i]);
     float result_val = static_cast<float>(h_C_result[i]);
+    if (result_val < 0.0f) {
+      printf("Result value is negative, which is unexpected. "
+                    "This might indicate an error in the computation or initialization.");
+      return 1;
+    }
     if (abs((ref_val - result_val) / ref_val)  > 5e-3f) {
       auto coord = h_C_layout.get_hier_coord(i);
       printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
