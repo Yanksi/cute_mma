@@ -231,7 +231,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     Tensor tCrR   = thr_mma1.make_fragment_B(tCsR(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
     Tensor tCrAR1 = thr_mma1.make_fragment_C(tCsAR_stage1); // (MMA, MMA_M, MMA_N)
     Tensor tCrAR2 = thr_mma2.make_fragment_A(tCsAR_stage2); // (MMA, MMA_M, MMA_K)
-    Tensor tCrB   = thr_mma2.make_fragment_B(sB_warp_atom(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
+    Tensor tCrB   = thr_mma2.make_fragment_B(tCsB(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
     Tensor tCrC   = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N, N_GROUPS)
     clear(tCrC); // Clear the accumulators
 
