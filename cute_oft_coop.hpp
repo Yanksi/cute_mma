@@ -119,6 +119,11 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
     int warp_idx = threadIdx.x / 32;
     int lane_idx = threadIdx.x % 32;
     auto warp_coord = warp_layout.get_hier_coord(warp_idx); // (WARP_M, WARP_N)
+    uint32_t warp_m = get<0>(warp_coord);
+    uint32_t warp_n = get<1>(warp_coord);
+
+    uint32_t threads_along_m = size<0>(warp_layout) * 32;
+    uint32_t threads_along_n = size<1>(warp_layout) * 32;
 
     auto cta_atom_layout_m = make_layout(
         make_shape(
@@ -331,7 +336,7 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
                 copy(tCrAR1, tCsAR_stage1); // copy the intermediate result into shared memory
                 asm volatile("bar.sync %0, %1;"
                              :
-                             : "r"(get<0>(warp_coord)), "r"(size<1>(warp_layout) * 32)); // wait for the data to be ready in the smem
+                             : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
                 copy(tCsAR_stage2, tCrAR2); // load the transformed result into rmem
                 gemm(single_warp_mma2, tCrAR2, tCrB(_,_,_,group,rmem_pipe_read), tCrC(_,_,_,group));
             }
