@@ -247,6 +247,10 @@ int main(int argc, char** argv)
     .help("the assumed speedup of the sparse tensor core")
     .default_value(2.0)
     .action([](const std::string& value) { return std::stod(value); });
+  program.add_argument("-rs", "--random_seed")
+    .help("Random seed for the input matrices")
+    .default_value(std::time(nullptr)) // Use current time as default seed
+    .action([](const std::string& value) { return std::stoi(value); });
   
   #ifdef DEBUG
   program.add_argument("--verbose")
@@ -316,7 +320,8 @@ int main(int argc, char** argv)
   );
 
   // set a time based random seed
-  std::srand(static_cast<unsigned int>(std::time(nullptr)));
+  int random_seed = program.get<int>("--random_seed");
+  std::srand(static_cast<unsigned int>(random_seed));
 
   for (int i = 0; i < size<0>(h_A_tensor); ++i) {
     for (int j = 0; j < size<1>(h_A_tensor); ++j) {
