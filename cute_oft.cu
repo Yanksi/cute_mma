@@ -40,6 +40,8 @@
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/fill.h>
+#include <thrust/execution_policy.h>
 
 #include <cute/tensor.hpp>
 #include <cute/atom/mma_atom.hpp>
@@ -189,6 +191,38 @@ void oft_tn(int m, int n, int k,
        C, C_layout, warp_layout, bP);
 }
 
+uint64_t check_result(
+  int m, int n,
+  thrust::host_vector<half>& h_C_result,
+  thrust::host_vector<half>& h_C_ref,
+  bool verbose = false
+) {
+  using namespace cute;
+  uint64_t error_count = 0;
+  auto h_C_layout = make_layout(
+    make_shape(m, n),
+    LayoutRight{}
+  );
+  for (int i = 0; i < h_C_result.size(); ++i) {
+    float ref_val = static_cast<float>(h_C_ref[i]);
+    float result_val = static_cast<float>(h_C_result[i]);
+    if (result_val < 0.0f) {
+      printf("Result value is negative, which is unexpected. "
+             "This might indicate an error in the computation or initialization.");
+      return -1;
+    }
+    if (abs((ref_val - result_val) / ref_val) > 5e-3f) {
+      auto coord = h_C_layout.get_hier_coord(i);
+      if (verbose) {
+        printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
+               static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
+      }
+      error_count++;
+    }
+  }
+  return error_count;
+}
+
 int main(int argc, char** argv)
 {
   using namespace cute;
@@ -209,15 +243,23 @@ int main(int argc, char** argv)
     .help("Number of iterations to time")
     .default_value(100)
     .action([](const std::string& value) { return std::stoi(value); });
-
+  program.add_argument("--sparse_speedup")
+    .help("the assumed speedup of the sparse tensor core")
+    .default_value(2.0)
+    .action([](const std::string& value) { return std::stod(value); });
+  
   #ifdef DEBUG
-  program.add_argument("-p", "--print_matrices")
-    .help("Print matrices A, B, R")
-    .default_value(false)
-    .implicit_value(true);
+  program.add_argument("--verbose")
+    .help("Print verbose output")
+    .default_value(0)
+    .action([](const std::string& value) { return std::stoi(value); });
   #endif
 
   #ifdef USE_CUBLAS
+  program.add_argument("--correctness")
+    .help("Check correctness of the kernel against cublas")
+    .default_value(false)
+    .implicit_value(true);
   program.add_argument("--cublas_mode")
     .help("The mode for the cublas kernel, either 'AR_W' or 'A_RW'")
     .default_value(std::string(""))
@@ -232,6 +274,11 @@ int main(int argc, char** argv)
     return 1;
   }
   
+  int verbose_level = 0;
+  #ifdef DEBUG
+  verbose_level = program.get<int>("--verbose");
+  #endif
+
   int m = program.get<int>("--m");
   int n = program.get<int>("--n");
   int k = program.get<int>("--k");
@@ -239,27 +286,32 @@ int main(int argc, char** argv)
 
   #ifdef USE_CUBLAS
   std::string cublas_mode = program.get<std::string>("--cublas_mode");
+  bool correctness_check = program.get<bool>("--correctness");
   #endif
+
+  int n_groups = n / GROUP_SIZE;
+  int reconn_sz = 8; // hardcoded reconnection size
+  int n_blocks = k / reconn_sz; // hardcoded reconnection size
 
   std::cout << "M = " << m << std::endl;
   std::cout << "N = " << n << std::endl;
   std::cout << "K = " << k << std::endl;
-
-  int n_groups = n / GROUP_SIZE;
+  std::cout << "Number of groups: " << n_groups << std::endl;
+  std::cout << "Number of blocks: " << n_blocks << std::endl;
 
   thrust::host_vector<half> h_A(m * k);
   thrust::host_vector<half> h_B(n * k);
-  thrust::host_vector<half> h_R(n_groups * 8 * k); // 8 is the hardcoded reconnection size
-  thrust::host_vector<half> h_C(m * n);
+  thrust::host_vector<half> h_R(n_groups * reconn_sz * k); // 8 is the hardcoded reconnection size
+  thrust::device_vector<half> d_C(m * n);
 
   Tensor h_A_tensor = make_tensor(h_A.data(), make_shape(m, k), LayoutRight{});
   Tensor h_B_tensor = make_tensor(h_B.data(), make_shape(n, k), LayoutRight{});
-  Tensor h_R_tensor = make_tensor(h_R.data(), make_shape(n_groups * 8, k), LayoutRight{});
+  Tensor h_R_tensor = make_tensor(h_R.data(), make_shape(n_groups * reconn_sz, k), LayoutRight{});
   Tensor h_R_4d = zipped_divide(
     h_R_tensor,
     make_tile(
-      make_layout(8), // hardcoded reconnection size
-      make_layout(8)  // hardcoded reconnection size
+      make_layout(reconn_sz), // hardcoded reconnection size
+      make_layout(reconn_sz)  // hardcoded reconnection size
     )
   );
 
@@ -272,7 +324,6 @@ int main(int argc, char** argv)
     }
   }
 
-  printf("A(0,0): %f\n", static_cast<float>(h_A_tensor(0, 0)));
 
   for (int i = 0; i < size<0>(h_B_tensor); ++i) {
     for (int j = 0; j < size<1>(h_B_tensor); ++j) {
@@ -280,19 +331,21 @@ int main(int argc, char** argv)
     }
   }
   
-  int shuffle_idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  // int shuffle_idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+  std::vector<int> shuffle_idx;
+  for (int i = 0; i < reconn_sz; ++i) {
+    shuffle_idx.push_back(i);
+  }
   for (int i = 0; i < size<1>(h_R_4d); ++i) {
     std::shuffle(std::begin(shuffle_idx), std::end(shuffle_idx), std::mt19937{std::random_device{}()});
-    for (int j = 0; j < 8; ++j) { // hardcoded reconnection size
+    for (int j = 0; j < reconn_sz; ++j) {
       // shuffle the indices to create a more complex pattern
       h_R_4d(make_coord(j, shuffle_idx[j]), i) = static_cast<half>(1.0f);
     }
   }
 
-  for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<half>(-1);
-
   #ifdef DEBUG
-  if (program.get<bool>("--print_matrices")) {
+  if (verbose_level >= 2) {
     printf("A:\n");
     for (int i = 0; i < size<0>(h_A_tensor); ++i) {
       for (int j = 0; j < size<1>(h_A_tensor); ++j) {
@@ -317,12 +370,12 @@ int main(int argc, char** argv)
       printf("\n");
     }
   }
-  #endif
+  #endif // DEBUG
 
   thrust::device_vector<half> d_A = h_A;
   thrust::device_vector<half> d_B = h_B;
-  thrust::device_vector<half> d_C = h_C;
   thrust::device_vector<half> d_R = h_R;
+  thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
 
   std::vector<std::function<void()>> test_funcs;
   test_funcs.push_back([&]() {
@@ -338,68 +391,68 @@ int main(int argc, char** argv)
   cublasHandle_t cublas_handle;
   getCublasTensorOpHandle(&cublas_handle);
   test_funcs.push_back([&]() {
-    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle, false);
+    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, false); // AR_W
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
   });
   test_funcs.push_back([&]() {
-    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, 8, &cublas_handle, true);
+    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, true);  // A_RW
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
   });
-  #endif
 
-  #ifdef DEBUG
-  test_funcs[0](); // warmup
-  thrust::host_vector<half> h_C_result = d_C;
-  d_C.assign(h_C.begin(), h_C.end()); // reset d_C to initial state
-  test_funcs[1](); // warmup
-  thrust::host_vector<half> h_C_ref = d_C;
-  bool check_result = true;
-  auto h_C_layout = make_layout(
-    make_shape(m, n),
-    LayoutRight{}
-  );
-  for (int i = 0; i < h_C_result.size(); ++i) {
-    float ref_val = static_cast<float>(h_C_ref[i]);
-    float result_val = static_cast<float>(h_C_result[i]);
-    if (result_val < 0.0f) {
-      printf("Result value is negative, which is unexpected. "
-                    "This might indicate an error in the computation or initialization.");
-      return 1;
-    }
-    if (abs((ref_val - result_val) / ref_val)  > 5e-3f) {
-      auto coord = h_C_layout.get_hier_coord(i);
-      printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
-             static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
-      // printf("Mismatch at index %d: %f != %
-      // printf("Mismatch at index %d: %f != %f\n", i, static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
-      check_result = false;
-      // return 1;
-    }
-  }
-  if (check_result) {
-    std::cout << "All results match!" << std::endl;
-  } else {
-    std::cout << "Some results do not match!" << std::endl;
-  }
-  #else
-
-  double n_blocks = k / 8.0; // hardcoded reconnection size
-  double base_t_flops = (double)m * n * k * 2.0 * 1e-12; // 2 flops per multiply-add
-  printf("Base TFLOPS: %.5f\n", base_t_flops);
-  double t_flops_AR_W = (((double)n_groups * m * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops; // 2 flops per multiply-add
-  double t_flops_AR_W_sparse = (((double)n_groups * m * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops * 2; // 2 flops per multiply-add
-  double t_flops_A_RW = (((double)n * k * k) / n_blocks) * 2.0 * 1e-12 + base_t_flops; // 2 flops per multiply-add
-  printf("Total TFLOPS (AR_W): %.5f, (AR_W_sparse): %.5f, (A_RW): %.5f\n", t_flops_AR_W, t_flops_AR_W_sparse, t_flops_A_RW);
-
-  auto test_func = test_funcs[0];
-  #ifdef USE_CUBLAS
+  auto test_func = test_funcs[0]; // default to the oft kernel
   if (cublas_mode == "AR_W") {
     test_func = test_funcs[1];
   } else if (cublas_mode == "A_RW") {
     test_func = test_funcs[2];
   }
-  #endif
-  test_func(); // warmup
+
+  if (correctness_check) {
+    // compute the two versions of reference results using cublas
+    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
+    test_funcs[1]();
+    thrust::host_vector<half> h_C_ref_AR_W = d_C;
+
+    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
+    test_funcs[2]();
+    thrust::host_vector<half> h_C_ref_A_RW = d_C;
+
+    // check the correctness of the oft kernel against cublas
+    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
+    test_func(); // run the oft kernel
+    thrust::host_vector<half> h_C_result = d_C;
+    
+    printf("Checking against AR_W reference result...\n");
+    uint64_t error_count_AR_W = check_result(m, n, h_C_result, h_C_ref_AR_W, verbose_level >= 1);
+    if(error_count_AR_W == 0) {
+      printf("oft kernel result matches AR_W reference result!\n");
+    } else {
+      printf("oft kernel result does NOT match AR_W reference result for %lu/%lu entries\n", error_count_AR_W, h_C_result.size());
+      // return 1;
+    }
+    printf("Checking against A_RW reference result...\n");
+    uint64_t error_count_A_RW = check_result(m, n, h_C_result, h_C_ref_A_RW, verbose_level >= 1);
+    if(error_count_A_RW == 0) {
+      printf("oft kernel result matches A_RW reference result!\n");
+    } else {
+      printf("oft kernel result does NOT match A_RW reference result for %lu/%lu entries\n", error_count_A_RW, h_C_result.size());
+      // return 1;
+    }
+  }
+  #endif // USE_CUBLAS
+
+  if (timing_iterations <= 0) {
+    return 0;
+  }
+
+  double base_t_flops = (double)m*n*k*2e-12; // 2 flops per multiply-add
+  printf("Base TFLOPS: %.5f\n", base_t_flops);
+  double additional_t_AR_W = (double)n_groups*m*k*reconn_sz*2e-12; // 2 flops per multiply-add
+  double additional_t_A_RW = (double)n*k*reconn_sz*2e-12; // 2 flops per multiply-add
+  double t_flops_A_RW = base_t_flops + additional_t_A_RW;
+  double t_flops_AR_W = base_t_flops + additional_t_AR_W;
+  double t_flops_AR_W_sparse = base_t_flops * program.get<double>("--sparse_speedup") + additional_t_AR_W;
+  printf("Total TFLOPS (AR_W): %.5f, (AR_W_sparse): %.5f, (A_RW): %.5f\n",
+         t_flops_AR_W, t_flops_AR_W_sparse, t_flops_A_RW);
 
   // Timing iterations
   GPU_Clock timer;
@@ -412,6 +465,5 @@ int main(int argc, char** argv)
   printf("Theoretical speedup: %.2f\n", theoretical_speedup);
   printf("TFLOPS/s (AR_W): %.2f, (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
          t_flops_AR_W / time, t_flops_AR_W_sparse / time, t_flops_A_RW / time, time * 1000.0);
-  #endif
   return 0;
 }
