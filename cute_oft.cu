@@ -37,6 +37,7 @@
 #ifdef USE_CUBLAS
 #include "cublas_oft.hpp"
 #endif
+#include "cpu_oft.hpp"
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -51,8 +52,7 @@
 #include <cutlass/util/helper_cuda.hpp>
 
 #include <argparse/argparse.hpp>
-#include <vector>
-
+#include <map>
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
@@ -264,6 +264,14 @@ int main(int argc, char** argv)
     .help("Check correctness of the kernel against cublas")
     .default_value(false)
     .implicit_value(true);
+  program.add_argument("--correctness_cpu")
+    .help("Check correctness of the kernel against CPU reference implementation")
+    .default_value(false)
+    .implicit_value(true);
+  program.add_argument("--01init")
+    .help("Initialize input matrices with 0s and 1s instead of random floats")
+    .default_value(false)
+    .implicit_value(true);
   program.add_argument("--cublas_mode")
     .help("The mode for the cublas kernel, either 'AR_W' or 'A_RW'")
     .default_value(std::string(""))
@@ -306,6 +314,7 @@ int main(int argc, char** argv)
   thrust::host_vector<half> h_A(m * k);
   thrust::host_vector<half> h_B(n * k);
   thrust::host_vector<half> h_R(n_groups * reconn_sz * k); // 8 is the hardcoded reconnection size
+  thrust::host_vector<half> h_C(m * n);
   thrust::device_vector<half> d_C(m * n);
 
   Tensor h_A_tensor = make_tensor(h_A.data(), make_shape(m, k), LayoutRight{});
@@ -321,21 +330,33 @@ int main(int argc, char** argv)
 
   // set a time based random seed
   int random_seed = program.get<int>("--random_seed");
+  int zo_init = program.get<bool>("--01init");
   std::srand(static_cast<unsigned int>(random_seed));
 
   for (int i = 0; i < size<0>(h_A_tensor); ++i) {
     for (int j = 0; j < size<1>(h_A_tensor); ++j) {
-      h_A_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
+      if (zo_init) {
+        // Initialize with 0s and 1s
+        h_A_tensor(i, j) = static_cast<half>(rand() % 2 * 1.0f);
+      } else {
+        // Initialize with random floats in the range [0, 1]
+        h_A_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
+      }
     }
   }
-
 
   for (int i = 0; i < size<0>(h_B_tensor); ++i) {
     for (int j = 0; j < size<1>(h_B_tensor); ++j) {
-      h_B_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
+      if (zo_init) {
+        // Initialize with 0s and 1s
+        h_B_tensor(i, j) = static_cast<half>(rand() % 2 * 1.0f);
+      } else {
+        // Initialize with random floats in the range [0, 1]
+        h_B_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
+      }
     }
   }
-  
+
   // int shuffle_idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
   std::vector<int> shuffle_idx;
   for (int i = 0; i < reconn_sz; ++i) {
@@ -382,51 +403,54 @@ int main(int argc, char** argv)
   thrust::device_vector<half> d_R = h_R;
   thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
 
-  std::vector<std::function<void()>> test_funcs;
-  test_funcs.push_back([&]() {
+  std::map<std::string, std::function<void()>> test_funcs;
+  test_funcs["oft_tn"] = [&]() {
     oft_tn(m, n, k,
       d_A.data().get(), k,
       d_B.data().get(), k,
       d_R.data().get(), k,
       d_C.data().get(), n);
     CUTE_CHECK_LAST();
-  });
+  };
+
+  test_funcs["cpu_oft_tn"] = [&]() {
+    cpu_oft_tn(
+      h_A, h_R, h_B, h_C,
+      m, GROUP_SIZE, n_groups, k, reconn_sz
+    );
+  };
+
+  auto test_func = test_funcs["oft_tn"]; // default to the oft kernel
 
   #ifdef USE_CUBLAS
   cublasHandle_t cublas_handle;
   getCublasTensorOpHandle(&cublas_handle);
-  test_funcs.push_back([&]() {
+  test_funcs["cublas_AR_W"] = [&]() {
     cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, false); // AR_W
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
-  });
-  test_funcs.push_back([&]() {
+  };
+  test_funcs["cublas_A_RW"] = [&]() {
     cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, true);  // A_RW
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
-  });
+  };
 
-  auto test_func = test_funcs[0]; // default to the oft kernel
   if (cublas_mode == "AR_W") {
-    test_func = test_funcs[1];
+    test_func = test_funcs["cublas_AR_W"];
   } else if (cublas_mode == "A_RW") {
-    test_func = test_funcs[2];
+    test_func = test_funcs["cublas_A_RW"];
   }
 
   if (correctness_check) {
-    // compute the two versions of reference results using cublas
-    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
-    test_funcs[1]();
-    thrust::host_vector<half> h_C_ref_AR_W = d_C;
-
-    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
-    test_funcs[2]();
-    thrust::host_vector<half> h_C_ref_A_RW = d_C;
-
     // check the correctness of the oft kernel against cublas
     thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
     test_func(); // run the oft kernel
     thrust::host_vector<half> h_C_result = d_C;
-    
+
+    // compute the two versions of reference results using cublas
     printf("Checking against AR_W reference result...\n");
+    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
+    test_funcs["cublas_AR_W"]();
+    thrust::host_vector<half> h_C_ref_AR_W = d_C;
     uint64_t error_count_AR_W = check_result(m, n, h_C_result, h_C_ref_AR_W, verbose_level >= 1);
     if(error_count_AR_W == 0) {
       printf("oft kernel result matches AR_W reference result!\n");
@@ -434,13 +458,31 @@ int main(int argc, char** argv)
       printf("oft kernel result does NOT match AR_W reference result for %lu/%lu entries\n", error_count_AR_W, h_C_result.size());
       // return 1;
     }
+
     printf("Checking against A_RW reference result...\n");
+    thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
+    test_funcs["cublas_A_RW"]();
+    thrust::host_vector<half> h_C_ref_A_RW = d_C;
     uint64_t error_count_A_RW = check_result(m, n, h_C_result, h_C_ref_A_RW, verbose_level >= 1);
     if(error_count_A_RW == 0) {
       printf("oft kernel result matches A_RW reference result!\n");
     } else {
       printf("oft kernel result does NOT match A_RW reference result for %lu/%lu entries\n", error_count_A_RW, h_C_result.size());
       // return 1;
+    }
+
+    if (program.get<bool>("--correctness_cpu")) {
+      // check the correctness of the oft kernel against CPU reference
+      printf("Checking against CPU reference result...\n");
+      thrust::fill(h_C.begin(), h_C.end(), static_cast<half>(-1.0f));
+      test_funcs["cpu_oft_tn"](); // compute the CPU reference result
+      uint64_t error_count_cpu = check_result(m, n, h_C_result, h_C, verbose_level >= 1);
+      if(error_count_cpu == 0) {
+        printf("oft kernel result matches CPU reference result!\n");
+      } else {
+        printf("oft kernel result does NOT match CPU reference result for %lu/%lu entries\n", error_count_cpu, h_C_result.size());
+        // return 1;
+      }
     }
   }
   #endif // USE_CUBLAS
