@@ -249,7 +249,7 @@ int main(int argc, char** argv)
     .action([](const std::string& value) { return std::stod(value); });
   program.add_argument("-rs", "--random_seed")
     .help("Random seed for the input matrices")
-    .default_value(std::time(nullptr)) // Use current time as default seed
+    .default_value(static_cast<int>(std::time(nullptr))) // Use current time as default seed
     .action([](const std::string& value) { return std::stoi(value); });
   
   #ifdef DEBUG

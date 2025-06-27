@@ -23,48 +23,16 @@ else ()
     set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_${CMAKE_CUDA_ARCHITECTURES},code=sm_${CMAKE_CUDA_ARCHITECTURES} --use_fast_math -O3")
 endif ()
 
-# Create a custom target to build all executables
-if(DEFINED ENV{CUTLASS_DIR})
-    set(CUTLASS_DIR $ENV{CUTLASS_DIR})
-else()
-    set(CUTLASS_DIR ${CMAKE_BINARY_DIR}/cutlass)
-    if(NOT EXISTS ${CUTLASS_DIR})
-        message(STATUS "Environment variable CUTLASS_DIR is not set. Cloning from GitHub...")
-        execute_process(
-            COMMAND git clone https://github.com/NVIDIA/cutlass.git ${CUTLASS_DIR}
-            RESULT_VARIABLE GIT_CLONE_RESULT
-        )
-        if(NOT GIT_CLONE_RESULT EQUAL "0")
-            message(FATAL_ERROR "Failed to clone CUTLASS repository")
-        endif()
-    else()
-        message(STATUS "CUTLASS repository already exists at ${CUTLASS_DIR}")
-    endif()
-endif()
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-if(DEFINED ENV{ARGPARSE_DIR})
-    set(ARGPARSE_DIR $ENV{ARGPARSE_DIR})
-else()
-    set(ARGPARSE_DIR ${CMAKE_BINARY_DIR}/argparse)
-    if(NOT EXISTS ${ARGPARSE_DIR})
-        message(STATUS "Environment variable ARGPARSE_DIR is not set. Cloning from GitHub...")
-        execute_process(
-            COMMAND git clone https://github.com/p-ranav/argparse.git ${ARGPARSE_DIR}
-            RESULT_VARIABLE GIT_CLONE_RESULT
-        )
-        if(NOT GIT_CLONE_RESULT EQUAL "0")
-            message(FATAL_ERROR "Failed to clone argparse repository")
-        endif()
-    else()
-        message(STATUS "argparse repository already exists at ${ARGPARSE_DIR}")
-    endif()
-endif()
-
+# Find CUTLASS
+find_package(Cutlass REQUIRED)
+# Find Argparse
+find_package(Argparse REQUIRED)
 # List of common include directories for CUTLASS
 set(COMMON_INCLUDE_DIRS
-    ${CUTLASS_DIR}/include
-    ${CUTLASS_DIR}/tools/util/include
-    ${ARGPARSE_DIR}/include
+    ${CUTLASS_INCLUDE_DIRS}
+    ${ARGPARSE_INCLUDE_DIRS}
 )
 
 add_executable(playground cute_playground.cu)
@@ -86,7 +54,6 @@ foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})
     target_include_directories(${PLAYGROUND_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
     target_link_libraries(${PLAYGROUND_NAME} PRIVATE CUDA::cublas)
 endforeach()
-
 
 
 # set(dtypes_o half float)
