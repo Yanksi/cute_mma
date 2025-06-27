@@ -331,6 +331,7 @@ int main(int argc, char** argv)
       d_B.data().get(), k,
       d_R.data().get(), k,
       d_C.data().get(), n);
+    CUTE_CHECK_LAST();
   });
 
   #ifdef USE_CUBLAS
@@ -348,7 +349,6 @@ int main(int argc, char** argv)
 
   #ifdef DEBUG
   test_funcs[0](); // warmup
-  CUTE_CHECK_LAST();
   thrust::host_vector<half> h_C_result = d_C;
   d_C.assign(h_C.begin(), h_C.end()); // reset d_C to initial state
   test_funcs[1](); // warmup
@@ -400,7 +400,6 @@ int main(int argc, char** argv)
   }
   #endif
   test_func(); // warmup
-  CUTE_CHECK_LAST();
 
   // Timing iterations
   GPU_Clock timer;
@@ -409,7 +408,6 @@ int main(int argc, char** argv)
     test_func();
   }
   double time = timer.seconds() / timing_iterations;
-  CUTE_CHECK_LAST();
   double theoretical_speedup = t_flops_AR_W_sparse / t_flops_AR_W;
   printf("Theoretical speedup: %.2f\n", theoretical_speedup);
   printf("TFLOPS/s (AR_W): %.2f, (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
