@@ -268,10 +268,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     int k_tile_count = size<3>(tAgA);
     // Current pipe index in smem to write to
     int smem_pipe_write = K_PIPE_MAX-1;
-    // Size of the register pipeline
-    auto K_BLOCK_MAX = size<3>(tCrA);
     // Number of groups for each warp
-    auto GROUP_PER_WARP = size<3>(tCrC);
+    int GROUP_PER_WARP = size<2,1>(tCrC_grouped);
 
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
@@ -295,9 +293,34 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     CUTE_NO_UNROLL
     while (k_tile_count > -(K_PIPE_MAX - 1)) {
         // slice the shared memory for the reading of this round
-        Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-        Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
-        Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
+        Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read); // (MMA, MMA_M, MMA_K, BLOCKS_ALONG_K)
+        Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
+        Tensor tCsAR_stage1_p = tCsAR_stage1(_,_,_,_,smem_pipe_read);  // (MMA, MMA_M, MMA_N, BLOCKS_ALONG_K)
+        Tensor tCsAR_stage2_p = tCsAR_stage2(_,_,_,smem_pipe_read); // (MMA, MMA_M, MMA_K)
+        Tensor tCsB_grouped_p = tCsB(_,_,_,smem_pipe_read); // (MMA, (MMA_N, N_GROUPS), MMA_K)
+        // Wait for the tile to be read from arrives
+        cp_async_wait<K_PIPE_MAX-2>();
+        __syncthreads();
+
+        // Load all A into shared memory for releasing the space in shared memory
+        copy(tCsA_p, tCrA);
+        CUTE_NO_UNROLL
+        for (int g = 0; g < n_groups; ++g) {
+            copy(tCsR_p(_,_,_,_0{},_), tCrR);
+            clear(tCrAR1); // clear the accumulator for storing AR
+            for (int j = 0; j < size<3>(tCrR); ++j) {
+                // apply the AR transformation
+                gemm(single_warp_mma1, tCrA(_,_,_,j), tCrR(_,_,_,j), tCrAR1(_,_,_,j));
+                copy(tCrAR1(_,_,_,j), tCsAR_stage1_p(_,_,_,j)); // copy the intermediate result into shared memory
+            }
+            asm volatile("bar.sync %0, %1;\n"
+                             :
+                             : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
+            copy(tCsAR_stage2_p, tCrAR2); // load the transformed result into rmem
+            copy(tCsB_grouped_p(_, make_coord(_, g), _), tCrB_grouped(_, make_coord(_, g), _));
+            gemm(single_warp_mma2, tCrAR2, tCrB_grouped(_, make_coord(_, g), _), tCrC_grouped(_, _, make_coord(_, g)));
+        }
+        
         // Issue new copy into shared memory if there's still tiles left
         if (k_tile_count > 0) {
             if (threadIdx.x < size(copy_a)) {
@@ -312,41 +335,9 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
                 // Only copy B if the threadIdx.x is within the range of copy_b
                 copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
             }
+            cp_async_fence();
         }
-        // Wait for the tile to be read from arrives
-        cp_async_wait<K_PIPE_MAX-2>();
-        __syncthreads();
 
-        // Load the first block of smem to rmem
-        copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
-        copy(tCsR_p(_,_,_,_,_0{}), tCrR(_,_,_,_,_0{}));
-        copy(tCsB_p(_,_,_,_,_0{}), tCrB(_,_,_,_,_0{}));
-
-        CUTE_UNROLL
-        for (int j = 0; j < K_BLOCK_MAX; ++j) {
-            // auto rmem_pipe_read = j % _2{};
-            // auto rmem_pipe_write = (j + _1{}) % _2{};
-            auto rmem_pipe_read = j;
-            auto rmem_pipe_write = (j + _1{}) % K_BLOCK_MAX;
-            // Load the next block
-            if (j < K_BLOCK_MAX - 1) {
-                copy(tCsA_p(_,_,_,  j + _1{}), tCrA(_,_,_,rmem_pipe_write));
-                copy(tCsR_p(_,_,_,_,j + _1{}), tCrR(_,_,_,_,rmem_pipe_write));
-                copy(tCsB_p(_,_,_,_,j + _1{}), tCrB(_,_,_,_,rmem_pipe_write));
-            }
-            CUTE_UNROLL
-            for (int group = 0; group < GROUP_PER_WARP; ++group) {
-                clear(tCrAR1); // clear the accumulator for storing AR
-                gemm(single_warp_mma1, tCrA(_,_,_,rmem_pipe_read), tCrR(_,_,_,group,rmem_pipe_read), tCrAR1);
-                copy(tCrAR1, tCsAR_stage1); // copy the intermediate result into shared memory
-                // __syncthreads();
-                asm volatile("bar.sync %0, %1;\n"
-                             :
-                             : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
-                copy(tCsAR_stage2, tCrAR2); // load the transformed result into rmem
-                gemm(single_warp_mma2, tCrAR2, tCrB(_,_,_,group,rmem_pipe_read), tCrC(_,_,_,group));
-            }
-        }
         --k_tile_count;
         ++k_tile_next;
         smem_pipe_write = smem_pipe_read;
