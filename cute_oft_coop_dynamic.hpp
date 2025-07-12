@@ -2,15 +2,16 @@
 #include "cute_oft_util.hpp"
 
 template <class ProblemShape, class CtaTiler,
-          class ALayout, class TiledCopyA,
-          class RLayout, class TiledCopyR, class ReconnSZ,
-          class BLayout, class TiledCopyB,
+          class SmemCopy,
+          class ALayout,
+          class RLayout, class ReconnSZ,
+          class BLayout,
           class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
-void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
-                half const *A, ALayout layout_a, TiledCopyA copy_a,
-                half const *R, RLayout layout_r, TiledCopyR copy_r, int group_sz, ReconnSZ reconn_sz,
-                half const *B, BLayout layout_b, TiledCopyB copy_b,
+void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler, SmemCopy smem_cp,
+                half const *A, ALayout layout_a,
+                half const *R, RLayout layout_r, int group_sz, ReconnSZ reconn_sz,
+                half const *B, BLayout layout_b,
                 half       *C, CLayout layout_c, WarpLayout warp_layout, Pipeline pipeline)
 {
     using namespace cute;
@@ -84,19 +85,18 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     //
     // Partition the copying of A and B tiles across the threads
     //
-    ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
-    Tensor tAgA = thr_copy_a.partition_S(gA); // (CPY,CPY_M,CPY_K,k)
-    Tensor tAsA = thr_copy_a.partition_D(sA); // (CPY,CPY_M,CPY_K,PIPE)
+    ThrCopy thr_copy = smem_cp.get_slice(threadIdx.x);
+
+    Tensor tAgA = thr_copy.partition_S(gA); // (CPY,CPY_M,CPY_K,k)
+    Tensor tAsA = thr_copy.partition_D(sA); // (CPY,CPY_M,CPY_K,PIPE)
     auto A_valid_threads = size(sA) / size(tAsA); // Number of threads that are valid for the A copy
 
-    ThrCopy thr_copy_r = copy_r.get_slice(threadIdx.x);
-    Tensor tAgR = thr_copy_r.partition_S(gR); // (CPY,CPY_R,CPY_K,k)
-    Tensor tAsR = thr_copy_r.partition_D(sR); // (CPY,CPY_R,CPY_K,PIPE)
+    Tensor tRgR = thr_copy.partition_S(gR); // (CPY,CPY_R,CPY_K,k)
+    Tensor tRsR = thr_copy.partition_D(sR); // (CPY,CPY_R,CPY_K,PIPE)
     auto R_valid_threads = size(sR) / size(tRsR); // Number of threads that are valid for the R copy
 
-    ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
-    Tensor tBgB = thr_copy_b.partition_S(gB); // (CPY,CPY_N,CPY_K,k)
-    Tensor tBsB = thr_copy_b.partition_D(sB); // (CPY,CPY_N,CPY_K,PIPE)
+    Tensor tBgB = thr_copy.partition_S(gB); // (CPY,CPY_N,CPY_K,k)
+    Tensor tBsB = thr_copy.partition_D(sB); // (CPY,CPY_N,CPY_K,PIPE)
     auto B_valid_threads = size(sB) / size(tBsB); // Number of threads that are valid for the B copy
 
     //
@@ -131,10 +131,11 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             make_coord(_,_), _
         ) // (WARPS_ALONG_N, 8, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
     ); // (WARPS_ALONG_N, WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    CUTE_STATIC_ASSERT_V(rank(_sA_warp_atom) == Int<5>{}); // (WARPS_ALONG_N, WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
     Tensor sA_warp_atom = _sA_warp_atom(get<1>(warp_coord), _, _, _, _); // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
     Tensor sAR_warp_atom_stage1 = sA_warp_atom; // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    Tensor sAR_warp_atom_stage2 = group<1,3>(group<0,2>(_sA_warp_atom)); // (WARP_M_REGION_STAGE2, BLK_K, PIPELINE)
+    Tensor sAR_warp_atom_stage2 = group_modes<1,3>(group_modes<0,2>(_sA_warp_atom)); // (WARP_M_REGION_STAGE2, BLK_K, PIPELINE)
     // For now, store the intermediate result back the shared memory also for the result of the current warp
 
     auto cta_atom_layout_n = make_layout(
@@ -164,8 +165,6 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             make_layout(reconn_sz)
         )
     ); // (RECONN_SZ, RECONN_SZ, N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
-
-    CUTE_STATIC_ASSERT_V(size<2>(sB_warp_atom) == size<2>(sR_warp_atom)); // N_GROUPS
 
     Tensor gC_warp = group_modes<1,3>(
             group_modes<0,3>(
@@ -233,7 +232,7 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             _, make_layout(blocks_in_group)
         )
     ); // (MMA, (MMA_N, N_GROUPS), MMA_K)
-
+    
     Tensor tCgC_grouped = logical_divide(
         tCgC,
         make_tile(
@@ -261,10 +260,6 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     // }
     // #endif
 
-    CUTE_STATIC_ASSERT_V(size<3>(tCsA) == size<4>(tCsR));
-    CUTE_STATIC_ASSERT_V(size<3>(tCsA) == size<4>(tCsB));
-    CUTE_STATIC_ASSERT_V(size<3>(tCsR) == size<3>(tCsB));
-
     int smem_pipe_read  = 0;
     auto K_PIPE_MAX = size<3>(tAsA);
     int k_tile_next = 0; // Current tile index in gmem to read from
@@ -278,15 +273,15 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
         if (threadIdx.x < A_valid_threads) {
             // Only copy A if the threadIdx.x is within the range of copy_a
-            copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
+            copy(smem_cp, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
         }
         if (threadIdx.x < R_valid_threads) {
             // Only copy R if the threadIdx.x is within the range of copy_r
-            copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
+            copy(smem_cp, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,k_pipe));
         }
         if (threadIdx.x < B_valid_threads) {
             // Only copy B if the threadIdx.x is within the range of copy_b
-            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+            copy(smem_cp, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
         }
         cp_async_fence();
         --k_tile_count;
@@ -300,7 +295,7 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
         Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
         Tensor tCsAR_stage1_p = tCsAR_stage1(_,_,_,_,smem_pipe_read);  // (MMA, MMA_M, MMA_N, BLOCKS_ALONG_K)
         Tensor tCsAR_stage2_p = tCsAR_stage2(_,_,_,smem_pipe_read); // (MMA, MMA_M, MMA_K)
-        Tensor tCsB_grouped_p = tCsB(_,_,_,smem_pipe_read); // (MMA, (MMA_N, N_GROUPS), MMA_K)
+        Tensor tCsB_grouped_p = tCsB_grouped(_,_,_,smem_pipe_read); // (MMA, (MMA_N, N_GROUPS), MMA_K)
         // Wait for the tile to be read from arrives
         cp_async_wait<K_PIPE_MAX-2>();
         __syncthreads();
@@ -309,7 +304,12 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
         copy(tCsA_p, tCrA);
         CUTE_NO_UNROLL
         for (int g = 0; g < n_groups; ++g) {
-            copy(tCsR_p(_,_,_,_0{},_), tCrR);
+            static_assert(rank<1>(tCsB_grouped_p) == 2); // Ensure the rank is correct
+            static_assert(rank(tCsB_grouped_p) == 3); // Ensure the rank is correct
+            Tensor tCsB_g = tCsB_grouped_p(_, make_coord(_, g), _); // (MMA, MMA_N, MMA_K)
+            Tensor tCrB_g = tCrB_grouped(_, make_coord(_, g), _); // (MMA, MMA_N, MMA_K)
+            Tensor tCrC_g = tCrC_grouped(_, _, make_coord(_, g));
+            copy(tCsR_p(_,_,_,g,_), tCrR);
             clear(tCrAR1); // clear the accumulator for storing AR
             for (int j = 0; j < size<3>(tCrR); ++j) {
                 // apply the AR transformation
@@ -320,23 +320,23 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
                              :
                              : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
             copy(tCsAR_stage2_p, tCrAR2); // load the transformed result into rmem
-            copy(tCsB_grouped_p(_, make_coord(_, g), _), tCrB_grouped(_, make_coord(_, g), _));
-            gemm(single_warp_mma2, tCrAR2, tCrB_grouped(_, make_coord(_, g), _), tCrC_grouped(_, _, make_coord(_, g)));
+            copy(tCsB_g, tCrB_g);
+            gemm(single_warp_mma2, tCrAR2, tCrB_g, tCrC_g);
         }
         
         // Issue new copy into shared memory if there's still tiles left
         if (k_tile_count > 0) {
             if (threadIdx.x < A_valid_threads) {
                 // Only copy A if the threadIdx.x is within the range of copy_a
-                copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
+                copy(smem_cp, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
             }
             if (threadIdx.x < R_valid_threads) {
                 // Only copy R if the threadIdx.x is within the range of copy_r
-                copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
+                copy(smem_cp, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,smem_pipe_write));
             }
             if (threadIdx.x < B_valid_threads) {
                 // Only copy B if the threadIdx.x is within the range of copy_b
-                copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
+                copy(smem_cp, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
             }
             cp_async_fence();
         }

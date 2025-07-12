@@ -83,14 +83,10 @@ namespace cute {
 }
 
 
-template <typename copy_as_t, typename ele_t,
-  typename _BM, typename _BK, typename _N_Threads>
-constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
+template <typename copy_as_t, typename ele_t, typename _BK, typename _N_Threads>
+constexpr auto cp_layout(_BK bk, _N_Threads total_threads) {
   using namespace cute;
   auto vec_width = Int<sizeof(copy_as_t) / sizeof(ele_t)>{};
-  auto total_elements = bm * bk;
-  auto needed_threads = total_elements / vec_width;
-  auto total_threads = min(_total_threads, needed_threads);
   auto threads_along_k = max(bk / vec_width, _1{});
   auto threads_k_size = bk / threads_along_k;
   auto threads_m_size = max(vec_width / bk, _1{});
@@ -152,11 +148,9 @@ void oft_tn(int m, int n, int k,
   );
 
   auto total_threads = size(warp_layout) * _32{};
-  TiledCopy copyA = cp_layout<uint128_t, half>(bM, bK, total_threads);
-  TiledCopy copyB = cp_layout<uint128_t, half>(bN, bK, total_threads);
-  TiledCopy copyR = cp_layout<uint128_t, half>(bN_group * reconn_sz, bK, total_threads);
+  TiledCopy smem_cp = cp_layout<uint128_t, half>(bK, total_threads);
 
-  size_t smem_size = get_smem_size(cta_tiler);
+  size_t smem_size = get_smem_size(cta_tiler, group_size, reconn_sz, bP);
 
   dim3 dimBlock(total_threads);
   dim3 dimGrid(size(ceil_div(M, bM)),
@@ -166,10 +160,10 @@ void oft_tn(int m, int n, int k,
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
   oft_device<<<dimGrid, dimBlock, smem_size, stream>>>
-      (prob_shape, blocks_tiler,
-       A, A_layout, copyA,
-       R, R_layout, copyR, group_size, reconn_sz,
-       B, B_layout, copyB,
+      (prob_shape, cta_tiler, smem_cp,
+       A, A_layout,
+       R, R_layout, group_size, reconn_sz,
+       B, B_layout,
        C, C_layout, warp_layout, bP);
 }
 
