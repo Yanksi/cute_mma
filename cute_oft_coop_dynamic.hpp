@@ -3,7 +3,7 @@
 
 template <class ProblemShape, class CtaTiler,
           class ALayout, class TiledCopyA,
-          class RLayout, class TiledCopyR, class ReconnSZ
+          class RLayout, class TiledCopyR, class ReconnSZ,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
@@ -133,8 +133,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     ); // (WARPS_ALONG_N, WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
     Tensor sA_warp_atom = _sA_warp_atom(get<1>(warp_coord), _, _, _, _); // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    Tensor sAR_warp_atom_stage_1 = sA_warp_atom; // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
-    Tensor sAR_warp_atom_stage_2 = group<1,3>(group<0,2>(_sA_warp_atom)); // (WARP_M_REGION_STAGE2, BLK_K, PIPELINE)
+    Tensor sAR_warp_atom_stage1 = sA_warp_atom; // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+    Tensor sAR_warp_atom_stage2 = group<1,3>(group<0,2>(_sA_warp_atom)); // (WARP_M_REGION_STAGE2, BLK_K, PIPELINE)
     // For now, store the intermediate result back the shared memory also for the result of the current warp
 
     auto cta_atom_layout_n = make_layout(
