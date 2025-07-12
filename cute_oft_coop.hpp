@@ -1,13 +1,13 @@
 #pragma once
 #include "cute_oft_util.hpp"
 
-template <class ProblemShape, class BlocksTiler,
+template <class ProblemShape, class CtaTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
-void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
+void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
                 half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
@@ -17,16 +17,17 @@ void oft_device(ProblemShape shape_MNK, BlocksTiler blocks_tiler,
 
     // Preconditions
     CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});    // (M, N, K)
-    CUTE_STATIC_ASSERT_V(size<1>(blocks_tiler) >= Int<1>{}); // Assume each thread block would handle at least one groups
-    CUTE_STATIC_ASSERT_V(is_integral<decltype(size<1>(blocks_tiler))>{});
-    static_assert(is_static<BlocksTiler>::value);
-    CUTE_STATIC_ASSERT_V(rank(blocks_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
+    CUTE_STATIC_ASSERT_V(is_integral<decltype(size<1>(cta_tiler))>{});
+    static_assert(is_static<CtaTiler>::value);
+    CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
     // CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
-    auto cta_tiler = make_shape(
-        size<0>(blocks_tiler),                    // BLK_M
-        size<1>(blocks_tiler) * group_sz,       // BLK_N
-        size<2>(blocks_tiler) * reconn_sz         // BLK_K
+    CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == 0); // Ensure the N dimension of the CTA tiler is divisible by group_sz
+    CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % reconn_sz == 0); // Ensure the K dimension of the CTA tiler is divisible by reconn_sz
+    auto blocks_tiler = make_shape(
+        size<0>(cta_tiler),                    // BLK_M
+        size<1>(cta_tiler) / group_sz,         // BLK_N_GROUPS
+        size<2>(cta_tiler) / reconn_sz          // BLK_K_BLOCKS
     );
     
     auto smem_atom = get_smem_atom(size<2>(cta_tiler));

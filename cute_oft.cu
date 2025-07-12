@@ -33,7 +33,7 @@
 #include <cassert>
 #include <random>
 // #include "cute_oft_simple.hpp"
-#include "cute_oft_coop.hpp"
+#include "cute_oft_coop_dynamic.hpp"
 #ifdef USE_CUBLAS
 #include "cublas_oft.hpp"
 #endif
