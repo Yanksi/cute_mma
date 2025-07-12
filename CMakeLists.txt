@@ -38,7 +38,7 @@ set(COMMON_INCLUDE_DIRS
 add_executable(playground cute_playground.cu)
 target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
-add_executable(cute_oft cute_oft.cu)
+add_executable(cute_oft cute_oft_dynamic.cu)
 target_include_directories(cute_oft PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(cute_oft PRIVATE CUDA::cublas)
 target_compile_definitions(cute_oft PRIVATE USE_CUBLAS)
