@@ -229,15 +229,15 @@ int main(int argc, char** argv)
   argparse::ArgumentParser program(std::string("oft"));
   program.add_argument("-m", "--m")
     .help("Number of rows in matrix A")
-    .default_value(128)
+    .default_value(4096)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-n", "--n")
     .help("Number of columns in matrix B")
-    .default_value(64)
+    .default_value(4096)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-k", "--k")
     .help("Number of columns in matrix A and rows in matrix B")
-    .default_value(32)
+    .default_value(4096)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-t", "--timing_iterations")
     .help("Number of iterations to time")
@@ -500,7 +500,7 @@ int main(int argc, char** argv)
   double t_flops_AR_W_sparse = base_t_flops * program.get<double>("--sparse_speedup") + additional_t_AR_W;
   printf("Total TFLOPS (AR_W): %.5f, (AR_W_sparse): %.5f, (A_RW): %.5f\n",
          t_flops_AR_W, t_flops_AR_W_sparse, t_flops_A_RW);
-
+  test_func(); // run the test function once to ensure everything is set up correctly
   // Timing iterations
   GPU_Clock timer;
   timer.start();

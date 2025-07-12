@@ -87,14 +87,17 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
     Tensor tAgA = thr_copy_a.partition_S(gA); // (CPY,CPY_M,CPY_K,k)
     Tensor tAsA = thr_copy_a.partition_D(sA); // (CPY,CPY_M,CPY_K,PIPE)
+    auto A_valid_threads = size(sA) / size(tAsA); // Number of threads that are valid for the A copy
 
     ThrCopy thr_copy_r = copy_r.get_slice(threadIdx.x);
     Tensor tAgR = thr_copy_r.partition_S(gR); // (CPY,CPY_R,CPY_K,k)
     Tensor tAsR = thr_copy_r.partition_D(sR); // (CPY,CPY_R,CPY_K,PIPE)
+    auto R_valid_threads = size(sR) / size(tRsR); // Number of threads that are valid for the R copy
 
     ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
     Tensor tBgB = thr_copy_b.partition_S(gB); // (CPY,CPY_N,CPY_K,k)
     Tensor tBsB = thr_copy_b.partition_D(sB); // (CPY,CPY_N,CPY_K,PIPE)
+    auto B_valid_threads = size(sB) / size(tBsB); // Number of threads that are valid for the B copy
 
     //
     // Define A/B partitioning and C accumulators manually
@@ -273,15 +276,15 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
 
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX-1; ++k_pipe) {
-        if (threadIdx.x < size(copy_a)) {
+        if (threadIdx.x < A_valid_threads) {
             // Only copy A if the threadIdx.x is within the range of copy_a
             copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
         }
-        if (threadIdx.x < size(copy_r)) {
+        if (threadIdx.x < R_valid_threads) {
             // Only copy R if the threadIdx.x is within the range of copy_r
             copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
         }
-        if (threadIdx.x < size(copy_b)) {
+        if (threadIdx.x < B_valid_threads) {
             // Only copy B if the threadIdx.x is within the range of copy_b
             copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
         }
@@ -323,15 +326,15 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
         
         // Issue new copy into shared memory if there's still tiles left
         if (k_tile_count > 0) {
-            if (threadIdx.x < size(copy_a)) {
+            if (threadIdx.x < A_valid_threads) {
                 // Only copy A if the threadIdx.x is within the range of copy_a
                 copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
             }
-            if (threadIdx.x < size(copy_r)) {
+            if (threadIdx.x < R_valid_threads) {
                 // Only copy R if the threadIdx.x is within the range of copy_r
                 copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
             }
-            if (threadIdx.x < size(copy_b)) {
+            if (threadIdx.x < B_valid_threads) {
                 // Only copy B if the threadIdx.x is within the range of copy_b
                 copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
             }
