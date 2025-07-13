@@ -219,33 +219,35 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler, SmemCopy smem_cp,
 
     int blocks_in_group = size<1>(tCrB) / n_groups; // Number of blocks in each group
     // Futher segment the MMA_N dimension in the second stage mma to groups
+    auto block_atom_N = _2{};
+    int atoms_in_group = blocks_in_group / block_atom_N; // Number of atoms in each group
     Tensor tCsB_grouped = logical_divide(
         tCsB,
         make_tile(
-            _, make_layout(blocks_in_group)
+            _, make_layout(make_shape(block_atom_N, atoms_in_group))
         )
-    ); // (MMA, (MMA_N, N_GROUPS), MMA_K, PIPELINE)
+    ); // (MMA, ((ATOM_SZ_N, ATOM_IN_GROUP), N_GROUPS), MMA_K, PIPELINE)
 
     Tensor tCrB_grouped = logical_divide(
         tCrB,
         make_tile(
-            _, make_layout(blocks_in_group)
+            _, make_layout(make_shape(block_atom_N, atoms_in_group))
         )
-    ); // (MMA, (MMA_N, N_GROUPS), MMA_K)
-    
+    ); // (MMA, ((ATOM_SZ_N, ATOM_IN_GROUP), N_GROUPS), MMA_K)
+
     Tensor tCgC_grouped = logical_divide(
         tCgC,
         make_tile(
-            _, _, make_layout(blocks_in_group)
+            _, _, make_layout(make_shape(block_atom_N, atoms_in_group))
         )
-    ); // (MMA, MMA_M, (MMA_N, N_GROUPS))
+    ); // (MMA, MMA_M, ((ATOM_SZ_N, ATOM_IN_GROUP), N_GROUPS))
 
     Tensor tCrC_grouped = logical_divide(
         tCrC,
         make_tile(
-            _, _, make_layout(blocks_in_group)
+            _, _, make_layout(make_shape(block_atom_N, atoms_in_group))
         )
-    ); // (MMA, MMA_M, (MMA_N, N_GROUPS))
+    ); // (MMA, MMA_M, ((ATOM_SZ_N, ATOM_IN_GROUP), N_GROUPS))
 
     // #ifdef DEBUG
     // if (threadIdx.x == 0) {
@@ -304,10 +306,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler, SmemCopy smem_cp,
         copy(tCsA_p, tCrA);
         CUTE_NO_UNROLL
         for (int g = 0; g < n_groups; ++g) {
-            static_assert(rank<1>(tCsB_grouped_p) == 2); // Ensure the rank is correct
-            static_assert(rank(tCsB_grouped_p) == 3); // Ensure the rank is correct
-            Tensor tCsB_g = tCsB_grouped_p(_, make_coord(_, g), _); // (MMA, MMA_N, MMA_K)
-            Tensor tCrB_g = tCrB_grouped(_, make_coord(_, g), _); // (MMA, MMA_N, MMA_K)
+            Tensor tCsB_g = tCsB_grouped_p(_, make_coord(_, g), _); // (MMA, (ATOM_SZ_N, ATOM_IN_GROUP), MMA_K)
+            Tensor tCrB_g = tCrB_grouped(_, make_coord(_, g), _); // (MMA, (ATOM_SZ_N, ATOM_IN_GROUP), MMA_K)
             Tensor tCrC_g = tCrC_grouped(_, _, make_coord(_, g));
             copy(tCsR_p(_,_,_,g,_), tCrR);
             clear(tCrAR1); // clear the accumulator for storing AR
@@ -321,7 +321,9 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler, SmemCopy smem_cp,
                              : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
             copy(tCsAR_stage2_p, tCrAR2); // load the transformed result into rmem
             copy(tCsB_g, tCrB_g);
-            gemm(single_warp_mma2, tCrAR2, tCrB_g, tCrC_g);
+            for (int j = 0; j < size<1,1>(tCsB_g); ++j) {
+                gemm(single_warp_mma2, tCrAR2, tCrB_g(_, make_coord(_, j), _), tCrC_g(_, _, make_coord(_, j)));
+            }
         }
         
         // Issue new copy into shared memory if there's still tiles left
