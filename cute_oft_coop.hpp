@@ -22,8 +22,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
     // CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
-    CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == 0); // Ensure the N dimension of the CTA tiler is divisible by group_sz
-    CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % reconn_sz == 0); // Ensure the K dimension of the CTA tiler is divisible by reconn_sz
+    CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == _0{}); // Ensure the N dimension of the CTA tiler is divisible by group_sz
+    CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % reconn_sz == _0{}); // Ensure the K dimension of the CTA tiler is divisible by reconn_sz
     auto blocks_tiler = make_shape(
         size<0>(cta_tiler),                    // BLK_M
         size<1>(cta_tiler) / group_sz,         // BLK_N_GROUPS
@@ -106,8 +106,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     Tensor tAsA = thr_copy_a.partition_D(sA); // (CPY,CPY_M,CPY_K,PIPE)
 
     ThrCopy thr_copy_r = copy_r.get_slice(threadIdx.x);
-    Tensor tAgR = thr_copy_r.partition_S(gR); // (CPY,CPY_R,CPY_K,k)
-    Tensor tAsR = thr_copy_r.partition_D(sR); // (CPY,CPY_R,CPY_K,PIPE)
+    Tensor tRgR = thr_copy_r.partition_S(gR); // (CPY,CPY_R,CPY_K,k)
+    Tensor tRsR = thr_copy_r.partition_D(sR); // (CPY,CPY_R,CPY_K,PIPE)
 
     ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
     Tensor tBgB = thr_copy_b.partition_S(gB); // (CPY,CPY_N,CPY_K,k)
@@ -217,12 +217,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     TiledMMA single_warp_mma2 = make_tiled_mma(
         mma_atom2{},
         make_layout(make_shape(_1{}, _1{})),
-        Tile<decltype(size<0>(sA_warp_atom)), decltype(size<0>(sB_warp_atom))>{}
+        Tile<decltype(size<0>(sAR_warp_atom_stage2)), decltype(size<0>(sB_warp_atom))>{}
     );
-
-    using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
-    using s2r_atom_R = Copy_Atom<SM75_U32x1_LDSM_N, half_t>;
-    using s2r_atom_B = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
 
     ThrMMA thr_mma1 = single_warp_mma1.get_slice(lane_idx);
     ThrMMA thr_mma2 = single_warp_mma2.get_slice(lane_idx);
@@ -240,6 +236,31 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     Tensor tCrB   = thr_mma2.make_fragment_B(tCsB(_, _, _, _, _, 0)); // (MMA, MMA_N, MMA_K, N_GROUPS, BLOCKS_ALONG_K)
     Tensor tCrC   = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N, N_GROUPS)
     clear(tCrC); // Clear the accumulators
+
+    using s2r_atom_A = Copy_Atom<SM75_U32x2_LDSM_N, half_t>;
+    using s2r_atom_R = Copy_Atom<SM75_U32x1_LDSM_N, half_t>;
+    using s2r_atom_AR = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
+    using s2r_atom_B = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
+    
+    TiledCopy s2r_copy_a = make_tiled_copy_A(s2r_atom_A{}, single_warp_mma1);
+    ThrCopy s2r_thr_copy_a = s2r_copy_a.get_slice(lane_idx);
+    Tensor tXsA = s2r_thr_copy_a.partition_S(sA_warp_atom);  // (CPY, CPY_M, CPY_K, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tXrA = s2r_thr_copy_a.retile_D(tCrA); // (CPY, CPY_M, CPY_K, BLOCKS_ALONG_K)
+
+    TiledCopy s2r_copy_r = make_tiled_copy_B(s2r_atom_R{}, single_warp_mma1);
+    ThrCopy s2r_thr_copy_r = s2r_copy_r.get_slice(lane_idx);
+    Tensor tXsR = s2r_thr_copy_r.partition_S(sR_warp_atom); // (CPY, CPY_N, CPY_K, N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tXrR = s2r_thr_copy_r.retile_D(tCrR); // (CPY, CPY_N, CPY_K, N_GROUPS, BLOCKS_ALONG_K)
+
+    TiledCopy s2r_copy_ar = make_tiled_copy_A(s2r_atom_AR{}, single_warp_mma2);
+    ThrCopy s2r_thr_copy_ar = s2r_copy_ar.get_slice(lane_idx);
+    Tensor tXsAR = s2r_thr_copy_ar.partition_S(sAR_warp_atom_stage2); // (CPY, CPY_M, CPY_N)
+    Tensor tXrAR = s2r_thr_copy_ar.retile_D(tCrAR2); // (CPY, CPY_M, CPY_N)
+
+    TiledCopy s2r_copy_b = make_tiled_copy_B(s2r_atom_B{}, single_warp_mma2);
+    ThrCopy s2r_thr_copy_b = s2r_copy_b.get_slice(lane_idx);
+    Tensor tXsB = s2r_thr_copy_b.partition_S(sB_warp_atom); // (CPY, CPY_N, CPY_K, N_GROUPS, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB); // (CPY, CPY_N, CPY_K, N_GROUPS, BLOCKS_ALONG_K)
 
     // #ifdef DEBUG
     // if (threadIdx.x == 0) {
@@ -277,7 +298,7 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
         }
         if (threadIdx.x < size(copy_r)) {
             // Only copy R if the threadIdx.x is within the range of copy_r
-            copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,k_pipe));
+            copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,k_pipe));
         }
         if (threadIdx.x < size(copy_b)) {
             // Only copy B if the threadIdx.x is within the range of copy_b
@@ -291,9 +312,13 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     CUTE_NO_UNROLL
     while (k_tile_count > -(K_PIPE_MAX - 1)) {
         // slice the shared memory for the reading of this round
-        Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
-        Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
-        Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
+        // Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
+        // Tensor tCsR_p = tCsR(_,_,_,_,_,smem_pipe_read);
+        // Tensor tCsB_p = tCsB(_,_,_,_,_,smem_pipe_read);
+
+        Tensor tXsA_p = tXsA(_,_,_,_,smem_pipe_read);
+        Tensor tXsR_p = tXsR(_,_,_,_,_,smem_pipe_read);
+        Tensor tXsB_p = tXsB(_,_,_,_,_,smem_pipe_read);
         // Issue new copy into shared memory if there's still tiles left
         if (k_tile_count > 0) {
             if (threadIdx.x < size(copy_a)) {
@@ -302,7 +327,7 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             }
             if (threadIdx.x < size(copy_r)) {
                 // Only copy R if the threadIdx.x is within the range of copy_r
-                copy(copy_r, tAgR(_,_,_,k_tile_next), tAsR(_,_,_,smem_pipe_write));
+                copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,smem_pipe_write));
             }
             if (threadIdx.x < size(copy_b)) {
                 // Only copy B if the threadIdx.x is within the range of copy_b
@@ -314,9 +339,12 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
         __syncthreads();
 
         // Load the first block of smem to rmem
-        copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
-        copy(tCsR_p(_,_,_,_,_0{}), tCrR(_,_,_,_,_0{}));
-        copy(tCsB_p(_,_,_,_,_0{}), tCrB(_,_,_,_,_0{}));
+        // copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
+        // copy(tCsR_p(_,_,_,_,_0{}), tCrR(_,_,_,_,_0{}));
+        // copy(tCsB_p(_,_,_,_,_0{}), tCrB(_,_,_,_,_0{}));
+        copy(s2r_atom_A{}, tXsA_p(_,_,_,_0{}), tXrA(_,_,_,_0{}));
+        copy(s2r_atom_R{}, tXsR_p(_,_,_,_,_0{}), tXrR(_,_,_,_,_0{}));
+        copy(s2r_atom_B{}, tXsB_p(_,_,_,_,_0{}), tXrB(_,_,_,_,_0{}));
 
         CUTE_UNROLL
         for (int j = 0; j < K_BLOCK_MAX; ++j) {
@@ -326,9 +354,13 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
             auto rmem_pipe_write = (j + _1{}) % K_BLOCK_MAX;
             // Load the next block
             if (j < K_BLOCK_MAX - 1) {
-                copy(tCsA_p(_,_,_,  j + _1{}), tCrA(_,_,_,rmem_pipe_write));
-                copy(tCsR_p(_,_,_,_,j + _1{}), tCrR(_,_,_,_,rmem_pipe_write));
-                copy(tCsB_p(_,_,_,_,j + _1{}), tCrB(_,_,_,_,rmem_pipe_write));
+                // copy(tCsA_p(_,_,_,  j + _1{}), tCrA(_,_,_,rmem_pipe_write));
+                // copy(tCsR_p(_,_,_,_,j + _1{}), tCrR(_,_,_,_,rmem_pipe_write));
+                // copy(tCsB_p(_,_,_,_,j + _1{}), tCrB(_,_,_,_,rmem_pipe_write));
+
+                copy(s2r_atom_A{}, tXsA_p(_,_,_,  j + _1{}), tXrA(_,_,_,rmem_pipe_write));
+                copy(s2r_atom_R{}, tXsR_p(_,_,_,_,j + _1{}), tXrR(_,_,_,_,rmem_pipe_write));
+                copy(s2r_atom_B{}, tXsB_p(_,_,_,_,j + _1{}), tXrB(_,_,_,_,rmem_pipe_write));
             }
             CUTE_UNROLL
             for (int group = 0; group < GROUP_PER_WARP; ++group) {
@@ -339,7 +371,8 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
                 asm volatile("bar.sync %0, %1;\n"
                              :
                              : "r"(warp_m), "r"(threads_along_n)); // wait for the data to be ready in the smem
-                copy(tCsAR_stage2, tCrAR2); // load the transformed result into rmem
+                // copy(tCsAR_stage2, tCrAR2); // load the transformed result into rmem
+                copy(s2r_atom_AR{}, tXsAR, tXrAR); // load the transformed result into rmem
                 gemm(single_warp_mma2, tCrAR2, tCrB(_,_,_,group,rmem_pipe_read), tCrC(_,_,_,group));
             }
         }

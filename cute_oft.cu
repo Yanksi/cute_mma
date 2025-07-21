@@ -33,7 +33,7 @@
 #include <cassert>
 #include <random>
 // #include "cute_oft_simple.hpp"
-#include "cute_oft_coop_dynamic.hpp"
+#include "cute_oft_coop.hpp"
 #ifdef USE_CUBLAS
 #include "cublas_oft.hpp"
 #endif
@@ -72,8 +72,12 @@ namespace cute {
   template <>
   struct Params <half, half> {
     static const unsigned int bM = 128;
+    static const unsigned int group_size = 256;
+    static const unsigned int reconn_sz = 8;
     static const unsigned int bN_group = 1;
     static const unsigned int bK_block = 2;
+    static const unsigned int bN = bN_group * group_size;
+    static const unsigned int bK = bK_block * reconn_sz;
     static const unsigned int bP = 3;
     static const bool block_tiling_copy = true;
     using warp_layout = Layout<Shape<Int<4>, Int<2>>>;
@@ -139,14 +143,15 @@ void oft_tn(int m, int n, int k,
   using CurrParams = Params<half, half>;
 
   // Define CTA tile sizes (static)
-  auto group_size = Int<GROUP_SIZE>{}; // Group size for the block tiling
-  auto reconn_sz = _8{}; // hardcoded for now, can be made dynamic later
+  auto group_size = Int<CurrParams::group_size>{}; // Group size for the block tiling
+  auto reconn_sz = Int<CurrParams::reconn_sz>{}; // Reconnection size for the block tiling
   auto bM = Int<CurrParams::bM>{};
   auto bN_group = Int<CurrParams::bN_group>{};
   auto bN = bN_group * group_size;
   auto bK_block = Int<CurrParams::bK_block>{};
   auto bK = bK_block * reconn_sz;
   auto blocks_tiler = make_shape(bM, bN_group, bK_block);                   // (BLK_M, BLK_N, BLK_K)
+  auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
   auto bP = Int<CurrParams::bP>{};  // Pipeline
   int n_groups = N / group_size;
   auto warp_layout = typename CurrParams::warp_layout{};
@@ -184,7 +189,7 @@ void oft_tn(int m, int n, int k,
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
-      (prob_shape, blocks_tiler,
+      (prob_shape, cta_tiler,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,
