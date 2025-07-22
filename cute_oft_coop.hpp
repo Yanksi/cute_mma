@@ -1,13 +1,16 @@
 #pragma once
 #include "cute_oft_util.hpp"
+#include "z_curve.hpp"
 
-template <class GridIdx, class CtaTiler,
+template <class GridShape, class CtaTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayout, class Pipeline>
 __global__ static __launch_bounds__(decltype(size(WarpLayout{}) * cute::_32{})::value)
-void oft_device(GridIdx const G, CtaTiler cta_tiler,
+void oft_device(//uint const *G,
+                GridShape grid_shape,
+                CtaTiler cta_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
                 half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
@@ -89,9 +92,11 @@ void oft_device(GridIdx const G, CtaTiler cta_tiler,
     Tensor mB = make_tensor(make_gmem_ptr(B), layout_b); // (N,K)
     Tensor mC = make_tensor(make_gmem_ptr(C), layout_c); // (M,N)
 
-    tuple<uint, uint> grid_coord = G[blockIdx.x];
-    // auto grid_coord = z_curve(grid_shape, blockIdx.x);
+    // tuple<uint, uint> grid_coord = G[blockIdx.x];
+    auto grid_coord = z_curve(grid_shape, blockIdx.x);
     auto cta_coord = append<3>(grid_coord, _); // (m,n,k)
+    // auto cta_coord = make_coord(G[blockIdx.x * 2], G[blockIdx.x * 2 + 1], _); // (m,n,k)
+    // auto cta_coord = make_coord(blockIdx.x / 16, blockIdx.x % 16, _); // (m,n,k)
     // auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)
@@ -100,7 +105,7 @@ void oft_device(GridIdx const G, CtaTiler cta_tiler,
         make_shape(
             size<1>(blocks_tiler) * reconn_sz,
             size<2>(cta_tiler)
-        ), make_coord(blockIdx.y, _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
+        ), make_coord(get<1>(cta_coord), _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
     //
     // Partition the copying of A and B tiles across the threads
     //

@@ -186,19 +186,33 @@ void oft_tn(int m, int n, int k,
   auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
   dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
 
-  thrust::host_vector<tuple<uint, uint>> h_G(size(grid_shape));
-  for (uint i = 0; i < size(h_G); ++i) {
-    h_G[i] = z_curve(grid_shape, i);
-  }
+  // thrust::host_vector<uint> h_G(size(grid_shape) * 2);
+  // uint * inspector = new uint[size(grid_shape)];
+  // Tensor inspector_tensor = make_tensor(inspector, grid_shape, LayoutRight{});
+  // for (uint i = 0; i < size(grid_shape); ++i) {
+  //   auto coord = z_curve(grid_shape, i);
+  //   h_G[i * 2] = get<0>(coord);
+  //   h_G[i * 2 + 1] = get<1>(coord);
+  //   inspector_tensor[coord] = i; // for debugging
+  // }
 
-  thrust::device_vector<tuple<uint, uint>> d_G = h_G;
+  // // for (int i = 0; i < size<0>(inspector_tensor); ++i) {
+  // //   for (int j = 0; j < size<1>(inspector_tensor); ++j) {
+  // //     printf("%4d ", inspector_tensor(i, j));
+  // //   }
+  // //   printf("\n");
+  // // }
+
+  // thrust::device_vector<uint> d_G = h_G;
+
+  // thrust::device_vector<tuple<uint, uint>> d_G = h_G;
 
   #ifdef DEBUG
   printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
-      (d_G, cta_tiler,
+      (grid_shape, cta_tiler,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,

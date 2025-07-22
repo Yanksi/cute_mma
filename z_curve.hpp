@@ -1,6 +1,7 @@
+#pragma once
 #include <cute/tensor.hpp>
 
-cute::tuple<uint, uint> smallest_prime_factor(const uint n) {
+__device__ __host__ inline cute::tuple<uint, uint> smallest_prime_factor(const uint n) {
     using namespace cute;
     if (n == 1) return make_tuple(1u, 1u); // No prime factors for numbers <= 1
     for (uint i = 2; i * i <= n; ++i) {
@@ -12,7 +13,7 @@ cute::tuple<uint, uint> smallest_prime_factor(const uint n) {
 }
 
 template <class Grid>
-auto z_curve(Grid grid_sz, uint curr_idx) {
+__device__ __host__ inline auto z_curve(Grid grid_sz, uint curr_idx) {
     using namespace cute;
     auto sizes = transform(grid_sz, [&](auto i) {return smallest_prime_factor(i);});
     auto curr_idx_tuple = repeat_like(grid_sz, 0u);
