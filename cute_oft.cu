@@ -38,6 +38,7 @@
 #include "cublas_oft.hpp"
 #endif
 #include "cpu_oft.hpp"
+#include "z_curve.hpp"
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -182,14 +183,23 @@ void oft_tn(int m, int n, int k,
   TiledCopy copyR = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN_group * reconn_sz, bK, size(warp_layout) * _32{});
 
   dim3 dimBlock(size(warp_layout) * _32{});
-  dim3 dimGrid(size(ceil_div(M, bM)),
-               size(ceil_div(N, bN)));
+  auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
+  dim3 dimGrid(get<0>(grid_shape), get<1>(grid_shape));
+
+  thrust::host_vector<tuple<uint, uint>> h_G(size(grid_shape));
+  for (uint i = 0; i < size(h_Gt); ++i) {
+    h_G[i] = z_curve(grid_shape, i);
+  }
+
+  thrust::device_vector<tuple<uint, uint>> d_G = h_G;
+  Tensor d_Gt = make_tensor(d_G.data().get(), grid_shape);
+
   #ifdef DEBUG
   printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
-      (prob_shape, cta_tiler,
+      (d_Gt, cta_tiler,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,

@@ -16,11 +16,11 @@ set (CMAKE_EXE_LINKER_FLAGS "-Wl,--as-needed")
 
 find_package (CUDAToolkit REQUIRED)
 
-set (CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -Xcompiler -fopenmp --expt-relaxed-constexpr")
+set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fopenmp --expt-relaxed-constexpr -lineinfo")
 if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -arch=sm_${CMAKE_CUDA_ARCHITECTURES} -g -G -lineinfo -Xptxas=-v -O0")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_${CMAKE_CUDA_ARCHITECTURES} -g -G -Xptxas=-v -O0")
 else ()
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -gencode arch=compute_${CMAKE_CUDA_ARCHITECTURES},code=sm_${CMAKE_CUDA_ARCHITECTURES} --use_fast_math -O3")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -gencode arch=compute_${CMAKE_CUDA_ARCHITECTURES},code=sm_${CMAKE_CUDA_ARCHITECTURES} --use_fast_math -O3")
 endif ()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -38,7 +38,7 @@ set(COMMON_INCLUDE_DIRS
 add_executable(playground cute_playground.cu)
 target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
-add_executable(cute_oft cute_oft_dynamic.cu)
+add_executable(cute_oft cute_oft.cu)
 target_include_directories(cute_oft PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(cute_oft PRIVATE CUDA::cublas)
 target_compile_definitions(cute_oft PRIVATE USE_CUBLAS)
