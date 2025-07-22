@@ -94,10 +94,9 @@ void oft_device(//uint const *G,
 
     // tuple<uint, uint> grid_coord = G[blockIdx.x];
     auto grid_coord = z_curve(grid_shape, blockIdx.x);
+    // auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
+    //                              blockIdx.x % get<1>(grid_shape));
     auto cta_coord = append<3>(grid_coord, _); // (m,n,k)
-    // auto cta_coord = make_coord(G[blockIdx.x * 2], G[blockIdx.x * 2 + 1], _); // (m,n,k)
-    // auto cta_coord = make_coord(blockIdx.x / 16, blockIdx.x % 16, _); // (m,n,k)
-    // auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)
     Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1,X>{});  // (BLK_M,BLK_N)
