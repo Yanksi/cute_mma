@@ -340,10 +340,14 @@ void oft_device(//uint const *G,
                 // Only copy B if the threadIdx.x is within the range of copy_b
                 copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
             }
+            cp_async_fence();
         }
         // Wait for the tile to be read from arrives
         cp_async_wait<K_PIPE_MAX-2>();
-        __syncthreads();
+        // __syncthreads();
+        asm volatile("bar.sync 15, %0;\n"
+                        :
+                        : "n"(size(warp_layout) * 32)); // wait for the data to be ready in the smem
 
         // Load the first block of smem to rmem
         // copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));

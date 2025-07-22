@@ -16,8 +16,8 @@ set (CMAKE_EXE_LINKER_FLAGS "-Wl,--as-needed")
 
 find_package (CUDAToolkit REQUIRED)
 
-# set (CMAKE_CUDA_FLAGS "-lineinfo --source-in-ptx")
-set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fopenmp --expt-relaxed-constexpr")
+set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -lineinfo")
+set (CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fopenmp --expt-relaxed-constexpr --ptxas-options=-v")
 if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -arch=sm_${CMAKE_CUDA_ARCHITECTURES} -Xptxas=-v -O0")
 else ()

@@ -142,7 +142,7 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
                              :
                              : "n"(n_threads_total)); // wait for the previous data to be consumed
             copy(tCrAR, tCsAR); // copy the intermediate result into shared memory
-            asm volatile("bar.arrive 2, %0;\n"
+            asm volatile("bar.arrive 1, %0;\n"
                              :
                              : "n"(n_threads_total)); // signal that the data is ready
         }
@@ -173,6 +173,7 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
     uint32_t warp_m = get<0>(warp_coord);
     uint32_t warp_n = get<1>(warp_coord);
 
+
     auto cta_atom_layout_m = make_layout(
         make_shape(
             size<0>(warp_layout_stage2), _8{}
@@ -180,20 +181,15 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
         LayoutRight{}
     );
 
-    auto cta_atom_layout_n = make_layout(
-        make_shape(
-            size<1>(warp_layout_stage2), _8{}
-        ),
-        LayoutRight{}
-    );
-
+    auto n_groups = max(tile_size_n / group_sz, _1{});
+    auto warp_per_group = n_groups / size<1>(warp_layout_stage2);
     auto tile_size_n = size<0>(gB);
     auto warp_tile_n = tile_size_n / size<1>(warp_layout_stage2);
+    uint32_t warp_group_id = warp_n / warp_per_group; // The group id of the current warp
     CUTE_STATIC_ASSERT_V(tile_size_n % size<1>(warp_layout_stage2) == _0{}); // Ensure the tile size is divisible by the number of warps in N dimension
-    CUTE_STATIC_ASSERT_V(warp_tile_n < group_sz);
-
+    CUTE_STATIC_ASSERT_V(warp_tile_n <= group_sz); // Each warp should handle at most one group
+    CUTE_STATIC_ASSERT_V(warp_tile_n >= _8{}); // The size of the atom should be at least 8
     
-
     Tensor sAR_warp_atom = group_modes<0,2>(
         logical_divide(
             sAR,
@@ -201,10 +197,111 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
                 cta_atom_layout_m,
                 make_layout(reconn_sz)
             )
-        )( // (((M_WARPS, 8), REST_M), (RECONN_SZ * N_GROUPS))
-            make_coord(make_coord(get<0>(warp_coord), _), _), _
-        ) // (8, REST_M, RECONN_SZ * N_GROUPS)
-    ); // (WARP_M_REGION, RECONN_SZ * N_GROUPS)
+        )( // (((M_WARPS, 8), REST_M), (RECONN_SZ, N_GROUPS))
+            make_coord(make_coord(warp_m, _), _), make_coord(_, warp_group_id)
+        ) // (8, REST_M, RECONN_SZ)
+    ); // (WARP_M_REGION, RECONN_SZ)
+
+    Tensor sB_warp_atom = logical_divide(
+        sB,
+        make_tile(
+            make_layout(warp_tile_n),
+            make_layout(reconn_sz)
+        )
+    )( // ((TILE_N, WARP_ALONG_N), (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
+        make_coord(_, warp_n), make_coord(_, _), _
+    ); // (TILE_N, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+
+    Tensor gC_warp = group_modes<0,2>(
+        logical_divide(
+            gC,
+            make_tile(
+                cta_atom_layout_m,
+                make_layout(warp_tile_n)
+            )
+        )( // (((M_WARPS, 8), REST_M), (TILE_N, WARP_ALONG_N))
+            make_coord(make_coord(warp_m, _), _), make_coord(_, warp_n)
+        ) // (8, REST_M, TILE_N)
+    );
+
+    using mma_atom2 = MMA_Atom<SM80_16x8x8_F32F16F16F32_TN>;
+    TiledMMA single_warp_mma2 = make_tiled_mma(
+        mma_atom2{},
+        make_layout(make_shape(_1{}, _1{})),
+        Tile<decltype(size<0>(gC_warp)), decltype(size<1>(gC_warp))>{}
+    );
+
+    ThrMMA thr_mma2 = single_warp_mma2.get_slice(lane_idx);
+    Tensor tCsAR = thr_mma2.partition_A(sAR_warp_atom); // (MMA, MMA_M, MMA_K)
+    Tensor tCsB  = thr_mma2.partition_B(sB_warp_atom);  // (MMA, MMA_N, MMA_K, BLOCKS_ALONG_K, PIPELINE)
+    Tensor tCgC  = thr_mma2.partition_C(gC_warp);       // (MMA, MMA_M, MMA_N)
+    
+    Tensor tCrAR = thr_mma2.make_fragment_A(tCsAR); // (MMA, MMA_M, MMA_K)
+    Tensor tCrB  = thr_mma2.make_fragment_B(tCsB(_, _, _, _, _0{})); // (MMA, MMA_N, MMA_K, BLOCKS_ALONG_K)
+    Tensor tCrC  = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N)
+    clear(tCrC); // Clear the accumulators
+
+    int smem_pipe_read = 0;
+    auto K_PIPE_MAX = size<3>(tBsB);
+    int k_tile_next = 0; // Current tile index in gmem to read from
+    int k_tile_count = size<3>(tBgB);
+    int smem_pipe_write = K_PIPE_MAX - 1;
+    auto K_BLOCK_MAX = size<3>(tCrB);
+    
+    CUTE_UNROLL
+    for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
+        if (lane_idx < size(copy_b)) {
+            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+        }
+        cp_async_fence();
+        --k_tile_count;
+        if (k_tile_count > 0) { ++k_tile_next; }
+    }
+
+    CUTE_NO_UNROLL
+    while (k_tile_count > -(K_PIPE_MAX - 1)) {
+        // slice the shared memory for the reading of this round
+        Tensor tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
+        if (k_tile_count > 0) {
+            if (lane_idx < size(copy_b)) {
+                copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+            }
+        }
+        cp_async_wait<K_PIPE_MAX-2>();
+        asm volatile("bar.sync 0, %0;\n"
+                             :
+                             : "n"(n_threads));
+        // wait for the data to be ready in the smem
+
+        // load the first block of smem to rmem
+        copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
+        copy(tCsR_p(_,_,_,_0{}), tCrR(_,_,_,_0{}));
+
+        CUTE_UNROLL
+        for (int j = 0; j < K_BLOCK_MAX; ++j) {
+            auto rmem_pipe_read = j;
+            auto rmem_pipe_write = (j + _1{}) % K_BLOCK_MAX;
+            if (j < K_BLOCK_MAX - 1) {
+                // load the next block
+                copy(tCsA_p(_,_,_,j + _1{}), tCrA(_,_,_,rmem_pipe_write));
+                copy(tCsR_p(_,_,_,j + _1{}), tCrR(_,_,_,rmem_pipe_write));
+            }
+            clear(tCrAR);
+            gemm(single_warp_mma1, tCrA(_,_,_,rmem_pipe_read), tCrR(_,_,_,rmem_pipe_read), tCrAR);
+            asm volatile("bar.sync 2, %0;\n"
+                             :
+                             : "n"(n_threads_total)); // wait for the previous data to be consumed
+            copy(tCrAR, tCsAR); // copy the intermediate result into shared memory
+            asm volatile("bar.arrive 1, %0;\n"
+                             :
+                             : "n"(n_threads_total)); // signal that the data is ready
+        }
+        --k_tile_count;
+        ++k_tile_next;
+        smem_pipe_write = smem_pipe_read;
+        ++smem_pipe_read;
+        smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
+    }
 
 }
 

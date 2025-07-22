@@ -1,33 +1,3 @@
-/***************************************************************************************************
- * Copyright (c) 2023 - 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- * list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * 3. Neither the name of the copyright holder nor the names of its
- * contributors may be used to endorse or promote products derived from
- * this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
- * SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- * CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
- * OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- **************************************************************************************************/
 #include <cstdlib>
 #include <cstdio>
 #include <cassert>
@@ -57,13 +27,6 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
-// #ifdef DEBUG
-// #define GROUP_SIZE 64
-// #else
-// #define GROUP_SIZE 256
-// #endif
-#define GROUP_SIZE 256
-
 namespace cute {
   template <typename TO, typename TR>
   struct Params {
@@ -85,6 +48,8 @@ namespace cute {
     // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
     // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
   };
+
+  using CurrParams = Params<half, half>;
 }
 
 template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
@@ -141,8 +106,6 @@ void oft_tn(int m, int n, int k,
   auto K = int(k);
   auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
-  using CurrParams = Params<half, half>;
-
   // Define CTA tile sizes (static)
   auto group_size = Int<CurrParams::group_size>{}; // Group size for the block tiling
   auto reconn_sz = Int<CurrParams::reconn_sz>{}; // Reconnection size for the block tiling
@@ -185,27 +148,6 @@ void oft_tn(int m, int n, int k,
   dim3 dimBlock(size(warp_layout) * _32{});
   auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
   dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
-
-  // thrust::host_vector<uint> h_G(size(grid_shape) * 2);
-  // uint * inspector = new uint[size(grid_shape)];
-  // Tensor inspector_tensor = make_tensor(inspector, grid_shape, LayoutRight{});
-  // for (uint i = 0; i < size(grid_shape); ++i) {
-  //   auto coord = z_curve(grid_shape, i);
-  //   h_G[i * 2] = get<0>(coord);
-  //   h_G[i * 2 + 1] = get<1>(coord);
-  //   inspector_tensor[coord] = i; // for debugging
-  // }
-
-  // // for (int i = 0; i < size<0>(inspector_tensor); ++i) {
-  // //   for (int j = 0; j < size<1>(inspector_tensor); ++j) {
-  // //     printf("%4d ", inspector_tensor(i, j));
-  // //   }
-  // //   printf("\n");
-  // // }
-
-  // thrust::device_vector<uint> d_G = h_G;
-
-  // thrust::device_vector<tuple<uint, uint>> d_G = h_G;
 
   #ifdef DEBUG
   printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
@@ -329,8 +271,10 @@ int main(int argc, char** argv)
   bool correctness_check = program.get<bool>("--correctness");
   #endif
 
-  int n_groups = n / GROUP_SIZE;
-  int reconn_sz = 8; // hardcoded reconnection size
+  int group_size = CurrParams::group_size; // group size for the block tiling
+  int reconn_sz = CurrParams::reconn_sz; // hardcoded reconnection size
+
+  int n_groups = n / group_size; // number of groups for the block tiling
   int n_blocks = k / reconn_sz; // hardcoded reconnection size
 
   std::cout << "M = " << m << std::endl;
@@ -444,7 +388,7 @@ int main(int argc, char** argv)
   test_funcs["cpu_oft_tn"] = [&]() {
     cpu_oft_tn(
       h_A, h_R, h_B, h_C,
-      m, GROUP_SIZE, n_groups, k, reconn_sz
+      m, group_size, n_groups, k, reconn_sz
     );
   };
 
@@ -454,11 +398,11 @@ int main(int argc, char** argv)
   cublasHandle_t cublas_handle;
   getCublasTensorOpHandle(&cublas_handle);
   test_funcs["cublas_AR_W"] = [&]() {
-    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, false); // AR_W
+    cublas_oft(d_A, d_R, d_B, d_C, m, group_size, n_groups, k, reconn_sz, &cublas_handle, false); // AR_W
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
   };
   test_funcs["cublas_A_RW"] = [&]() {
-    cublas_oft(d_A, d_R, d_B, d_C, m, GROUP_SIZE, n_groups, k, reconn_sz, &cublas_handle, true);  // A_RW
+    cublas_oft(d_A, d_R, d_B, d_C, m, group_size, n_groups, k, reconn_sz, &cublas_handle, true);  // A_RW
     GEMM_CHECK_CUDA(cudaDeviceSynchronize());
   };
 
