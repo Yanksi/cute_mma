@@ -184,22 +184,21 @@ void oft_tn(int m, int n, int k,
 
   dim3 dimBlock(size(warp_layout) * _32{});
   auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  dim3 dimGrid(get<0>(grid_shape), get<1>(grid_shape));
+  dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
 
   thrust::host_vector<tuple<uint, uint>> h_G(size(grid_shape));
-  for (uint i = 0; i < size(h_Gt); ++i) {
+  for (uint i = 0; i < size(h_G); ++i) {
     h_G[i] = z_curve(grid_shape, i);
   }
 
   thrust::device_vector<tuple<uint, uint>> d_G = h_G;
-  Tensor d_Gt = make_tensor(d_G.data().get(), grid_shape);
 
   #ifdef DEBUG
   printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
   oft_device<<<dimGrid, dimBlock, 0, stream>>>
-      (d_Gt, cta_tiler,
+      (d_G, cta_tiler,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,

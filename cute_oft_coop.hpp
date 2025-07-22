@@ -89,7 +89,7 @@ void oft_device(GridIdx const G, CtaTiler cta_tiler,
     Tensor mB = make_tensor(make_gmem_ptr(B), layout_b); // (N,K)
     Tensor mC = make_tensor(make_gmem_ptr(C), layout_c); // (M,N)
 
-    auto grid_coord = G(blockIdx.x, blockIdx.y);
+    auto grid_coord = G[blockIdx.x];
     // auto grid_coord = z_curve(grid_shape, blockIdx.x);
     auto cta_coord = append<3>(grid_coord, _); // (m,n,k)
     // auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
