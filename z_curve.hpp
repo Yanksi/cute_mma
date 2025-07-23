@@ -3,15 +3,12 @@
 
 __device__ __host__ inline cute::tuple<uint, uint> smallest_prime_factor(const uint n) {
     using namespace cute;
-    if (n == 1) return make_tuple(1u, 1u); // No prime factors for numbers <= 1
-    constexpr uint first_primes[4] = {2, 3, 5, 7};
-    CUTE_UNROLL
-    for (uint i = 0; i < 4; ++i) {
-        if (n % first_primes[i] == 0) {
-            return make_tuple(n / first_primes[i], first_primes[i]); // Return the smallest prime factor
-        }
-    }
-    for (uint i = 11; i * i <= n; ++i) {
+    if (n == 1) [[unlikely]] return make_tuple(1u, 1u); // No prime factors for numbers <= 1
+    if (n % 2 == 0) [[likely]] return make_tuple(n / 2u, 2u); // Handle even numbers quickly
+    if (n % 3 == 0) [[likely]] return make_tuple(n / 3u, 3u); // Handle multiples of 3 quickly
+    if (n % 5 == 0) [[likely]] return make_tuple(n / 5u, 5u); // Handle multiples of 5 quickly
+    if (n % 7 == 0) [[likely]] return make_tuple(n / 7u, 7u); // Handle multiples of 7 quickly
+    for (uint i = 11; i * i <= n; ++i) [[unlikely]] {
         if (n % i == 0) {
             return make_tuple(n / i, i); // Return the smallest prime factor
         }

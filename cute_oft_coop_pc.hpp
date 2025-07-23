@@ -22,8 +22,8 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
     Tensor tRsR = thr_copy_r.partition_D(sR); // (CPY,CPY_M,CPY_K,PIPE)
 
     auto n_warps = size(warps_stage1);
-    constexpr uint32_t n_threads = n_warps * 32;
-    constexpr uint32_t n_threads_total = size(n_total_warps) * 32;
+    constexpr uint32_t n_threads1 = n_warps * 32;
+    constexpr uint32_t n_threads_total = size(n_total_warps) * 32 + n_threads1;
     uint32_t warp_idx = thread_idx / 32;
     uint32_t lane_idx = thread_idx % 32;
 
@@ -91,9 +91,7 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
 
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
-        if (lane_idx < size(copy_a)) {
-            copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-        }
+        copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
         if (lane_idx < size(copy_r)) {
             copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,k_pipe));
         }
@@ -108,19 +106,17 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
         Tensor tCsA_p = tCsA(_,_,_,_,smem_pipe_read);
         Tensor tCsR_p = tCsR(_,_,_,_,smem_pipe_read);
         if (k_tile_count > 0) {
-            if (lane_idx < size(copy_a)) {
-                // Only copy A if the threadIdx.x is within the range of copy_a
-                copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
-            }
+            copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
             if (lane_idx < size(copy_r)) {
                 // Only copy R if the threadIdx.x is within the range of copy_r
                 copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,smem_pipe_write));
             }
+            cp_async_fence();
         }
         cp_async_wait<K_PIPE_MAX-2>();
         asm volatile("bar.sync 0, %0;\n"
                              :
-                             : "n"(n_threads));
+                             : "n"(n_threads1));
         // wait for the data to be ready in the smem
 
         // load the first block of smem to rmem
@@ -181,6 +177,8 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
         LayoutRight{}
     );
 
+    constexpr uint32_t n_threads2 = size(warp_layout_stage2) * 32;
+    constexpr uint32_t n_threads_total = size(warps_stage1) * 32 + n_threads2;
     auto n_groups = max(tile_size_n / group_sz, _1{});
     auto warp_per_group = n_groups / size<1>(warp_layout_stage2);
     auto tile_size_n = size<0>(gB);
@@ -250,51 +248,50 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
     
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
-        if (lane_idx < size(copy_b)) {
-            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-        }
+        copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
         cp_async_fence();
         --k_tile_count;
         if (k_tile_count > 0) { ++k_tile_next; }
     }
+
+    asm volatile("bar.arrive 2, %0;\n"
+                    :
+                    : "n"(n_threads_total)); // signal the producer that current threads are ready to consume data
 
     CUTE_NO_UNROLL
     while (k_tile_count > -(K_PIPE_MAX - 1)) {
         // slice the shared memory for the reading of this round
         Tensor tCsB_p = tCsB(_,_,_,_,smem_pipe_read);
         if (k_tile_count > 0) {
-            if (lane_idx < size(copy_b)) {
-                copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
-            }
+            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+            cp_async_fence();
         }
-        cp_async_wait<K_PIPE_MAX-2>();
-        asm volatile("bar.sync 0, %0;\n"
-                             :
-                             : "n"(n_threads));
         // wait for the data to be ready in the smem
+        cp_async_wait<K_PIPE_MAX-2>();
+        asm volatile("bar.sync 3, %0;\n"
+                             :
+                             : "n"(n_threads2));
 
         // load the first block of smem to rmem
-        copy(tCsA_p(_,_,_,_0{}), tCrA(_,_,_,_0{}));
-        copy(tCsR_p(_,_,_,_0{}), tCrR(_,_,_,_0{}));
+        copy(tCsB_p(_,_,_,_0{}), tCrB(_,_,_,_0{}));
 
         CUTE_UNROLL
         for (int j = 0; j < K_BLOCK_MAX; ++j) {
             auto rmem_pipe_read = j;
             auto rmem_pipe_write = (j + _1{}) % K_BLOCK_MAX;
+            // wait for producer's data
+            asm volatile("bar.sync 1, %0;\n"
+                                :
+                                : "n"(n_threads2));
             if (j < K_BLOCK_MAX - 1) {
                 // load the next block
-                copy(tCsA_p(_,_,_,j + _1{}), tCrA(_,_,_,rmem_pipe_write));
-                copy(tCsR_p(_,_,_,j + _1{}), tCrR(_,_,_,rmem_pipe_write));
+                copy(tCsAR, tCrAR);
+                copy(tCsB_p(_,_,_,j + _1{}), tCrB(_,_,_,rmem_pipe_write));
             }
-            clear(tCrAR);
-            gemm(single_warp_mma1, tCrA(_,_,_,rmem_pipe_read), tCrR(_,_,_,rmem_pipe_read), tCrAR);
-            asm volatile("bar.sync 2, %0;\n"
+            asm volatile("bar.arrive 2, %0;\n"
                              :
-                             : "n"(n_threads_total)); // wait for the previous data to be consumed
-            copy(tCrAR, tCsAR); // copy the intermediate result into shared memory
-            asm volatile("bar.arrive 1, %0;\n"
-                             :
-                             : "n"(n_threads_total)); // signal that the data is ready
+                             : "n"(n_threads_total)); // signal the producer
+            gemm(single_warp_mma2, tCrAR, tCrB(_,_,_,rmem_pipe_write), tCrC);
         }
         --k_tile_count;
         ++k_tile_next;
@@ -302,7 +299,7 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
         ++smem_pipe_read;
         smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
     }
-
+    copy(tCrC, tCgC); // Copy the final result to gC
 }
 
 template <class ProblemShape, class CtaTiler,
