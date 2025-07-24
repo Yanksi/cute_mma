@@ -1,5 +1,6 @@
 #pragma once
 #include "cute_oft_util.hpp"
+#include "z_curve.hpp"
 
 
 template <class TiledCopyA,
@@ -310,13 +311,13 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
     copy(tCrC, tCgC); // Copy the final result to gC
 }
 
-template <class ProblemShape, class CtaTiler,
+template <class GridShape, class CtaTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize,
           class BLayout, class TiledCopyB,
           class CLayout, class WarpLayoutStage1, class WarpLayoutStage2, class Pipeline>
 __global__ static __launch_bounds__(decltype((size(WarpLayoutStage1{}) + size(WarpLayoutStage2{})) * cute::_32{})::value)
-void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
+void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
                 half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
@@ -325,7 +326,6 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     using namespace cute;
 
     // Preconditions
-    CUTE_STATIC_ASSERT_V(rank(shape_MNK) == Int<3>{});    // (M, N, K)
     CUTE_STATIC_ASSERT_V(is_integral<decltype(size<1>(cta_tiler))>{});
     static_assert(is_static<CtaTiler>::value);
     CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
@@ -398,7 +398,10 @@ void oft_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     Tensor mB = make_tensor(make_gmem_ptr(B), layout_b); // (N,K)
     Tensor mC = make_tensor(make_gmem_ptr(C), layout_c); // (M,N)
 
-    auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
+    auto grid_coord = z_curve(grid_shape, blockIdx.x);
+    // auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
+    //                              blockIdx.x % get<1>(grid_shape)); // (m,n)
+    auto cta_coord =  append<3>(grid_coord, _);
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)
     Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1,X>{});  // (BLK_M,BLK_N)
