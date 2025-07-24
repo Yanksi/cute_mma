@@ -3,13 +3,14 @@
 #include "z_curve.hpp"
 
 
-template <class TiledCopyA,
-          class TiledCopyR, class ReconnectSize,
+template <class TensorGA, class TensorSA, class TiledCopyA,
+          class TensorGR, class TensorSR, class TiledCopyR, class ReconnectSize,
+          class TensorSAR,
           class WarpLayoutStage1, class WarpLayoutStage2>
 __device__ static inline
-void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
-            Tensor const &gR, Tensor &sR, TiledCopyR copy_r, ReconnectSize reconn_sz,
-            Tensor &sAR, int thread_idx,
+void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
+            TensorGR const &gR, TensorSR &sR, TiledCopyR copy_r, ReconnectSize reconn_sz,
+            TensorSAR &sAR, int thread_idx,
             WarpLayoutStage1 warps_stage1, WarpLayoutStage2 warps_stage2)
 {
     // This function should revice blocked corresponding tensors
@@ -154,12 +155,14 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
     }
 }
 
-template <class TiledCopyB, class GroupSize,
+template <class TensorGB, class TensorSB, class TiledCopyB,
+          class TensorSAR, class GroupSize,  class ReconnectSize,
+          class TensorGC,
           class WarpLayoutStage1, class WarpLayoutStage2>
-__device static inline
-void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
-             Tensor const &sAR, GroupSize group_sz,
-             Tensor &gC, int thread_idx,
+__device__ static inline
+void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
+             TensorSAR const &sAR, GroupSize group_sz, ReconnectSize reconn_sz,
+             TensorGC &gC, int thread_idx,
              WarpLayoutStage1 warps_stage1, WarpLayoutStage2 warp_layout_stage2)
 {
     using namespace cute;
@@ -183,9 +186,9 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
 
     constexpr uint32_t n_threads2 = size(warp_layout_stage2) * 32;
     constexpr uint32_t n_threads_total = size(warps_stage1) * 32 + n_threads2;
+    auto tile_size_n = size<0>(gB);
     auto n_groups = max(tile_size_n / group_sz, _1{});
     auto warp_per_group = size<1>(warp_layout_stage2) / n_groups;
-    auto tile_size_n = size<0>(gB);
     auto warp_tile_n = tile_size_n / size<1>(warp_layout_stage2);
     uint32_t warp_group_id = warp_n / warp_per_group; // The group id of the current warp
     CUTE_STATIC_ASSERT_V(tile_size_n % size<1>(warp_layout_stage2) == _0{}); // Ensure the tile size is divisible by the number of warps in N dimension
@@ -261,7 +264,7 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
     int k_tile_next = 0; // Current tile index in gmem to read from
     int k_tile_count = size<3>(tBgB);
     int smem_pipe_write = K_PIPE_MAX - 1;
-    auto K_BLOCK_MAX = size<3>(tCrB);
+    auto K_BLOCK_MAX = size<3>(tCsB);
     
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
@@ -280,7 +283,7 @@ void oft_arb(Tensor const &gB, Tensor &sB, TiledCopy copy_b,
         // slice the shared memory for the reading of this round
         Tensor tXsB_p = tXsB(_,_,_,_,smem_pipe_read);
         if (k_tile_count > 0) {
-            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,k_pipe));
+            copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
         }
         cp_async_fence();
         // wait for the data to be ready in the smem
@@ -425,7 +428,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         // Call the ARB kernel
         oft_arb(
             gB, sB, copy_b,
-            sAR, group_sz,
+            sAR, group_sz, reconn_sz,
             gC, thread_idx - stage1_threads,
             warp_layout_stage1, warp_layout_stage2
         );
