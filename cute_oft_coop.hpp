@@ -340,10 +340,11 @@ void oft_device(//uint const *G,
                 // Only copy B if the threadIdx.x is within the range of copy_b
                 copy(copy_b, tBgB(_,_,_,k_tile_next), tBsB(_,_,_,smem_pipe_write));
             }
-            cp_async_fence();
+            
         }
+        cp_async_fence();
         // Wait for the tile to be read from arrives
-        cp_async_wait<K_PIPE_MAX-2>();
+        cp_async_wait<K_PIPE_MAX-1>();
         // __syncthreads();
         asm volatile("bar.sync 15, %0;\n"
                         :

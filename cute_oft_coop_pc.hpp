@@ -9,7 +9,7 @@ __device__ static inline
 void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
             Tensor const &gR, Tensor &sR, TiledCopyR copy_r, ReconnectSize reconn_sz,
             Tensor &sAR, int thread_idx,
-            WarpLayoutStage1 warps_stage1, WarpLayoutStage2 n_total_warps)
+            WarpLayoutStage1 warps_stage1, WarpLayoutStage2 warps_stage2)
 {
     // This function should revice blocked corresponding tensors
     using namespace cute;
@@ -23,7 +23,7 @@ void oft_ar(Tensor const &gA, Tensor &sA, TiledCopyA copy_a,
 
     auto n_warps = size(warps_stage1);
     constexpr uint32_t n_threads1 = n_warps * 32;
-    constexpr uint32_t n_threads_total = size(n_total_warps) * 32 + n_threads1;
+    constexpr uint32_t n_threads_total = size(warps_stage2) * 32 + n_threads1;
     uint32_t warp_idx = thread_idx / 32;
     uint32_t lane_idx = thread_idx % 32;
 

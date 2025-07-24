@@ -165,6 +165,8 @@ uint64_t check_result(
   int m, int n,
   thrust::host_vector<half>& h_C_result,
   thrust::host_vector<half>& h_C_ref,
+  float * maximum_error,
+  float error_threshold = 5e-3,
   bool verbose = false
 ) {
   using namespace cute;
@@ -181,7 +183,9 @@ uint64_t check_result(
              "This might indicate an error in the computation or initialization.");
       return -1;
     }
-    if (abs((ref_val - result_val) / ref_val) > 5e-3f) {
+    float error = abs((ref_val - result_val) / ref_val);
+    *maximum_error = max(*maximum_error, error);
+    if (error > error_threshold) {
       auto coord = h_C_layout.get_hier_coord(i);
       if (verbose) {
         printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
@@ -423,38 +427,52 @@ int main(int argc, char** argv)
     thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
     test_funcs["cublas_AR_W"]();
     thrust::host_vector<half> h_C_ref_AR_W = d_C;
-    uint64_t error_count_AR_W = check_result(m, n, h_C_result, h_C_ref_AR_W, verbose_level >= 1);
+    float maximum_error_AR_W = 0.0f;
+    uint64_t error_count_AR_W = check_result(m, n, h_C_result, h_C_ref_AR_W, &maximum_error_AR_W, 5e-3, verbose_level >= 1);
+    float error_rate_AR_W = static_cast<float>(error_count_AR_W) / h_C_result.size();
     if(error_count_AR_W == 0) {
       printf("oft kernel result matches AR_W reference result!\n");
     } else {
       printf("oft kernel result does NOT match AR_W reference result for %lu/%lu entries\n", error_count_AR_W, h_C_result.size());
+      printf("Error rate: %.2f%%\n", error_rate_AR_W * 100.0);
+      printf("Maximum error: %.5f\n", maximum_error_AR_W);
       // return 1;
     }
+    printf("\n\n");
 
     printf("Checking against A_RW reference result...\n");
     thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
     test_funcs["cublas_A_RW"]();
     thrust::host_vector<half> h_C_ref_A_RW = d_C;
-    uint64_t error_count_A_RW = check_result(m, n, h_C_result, h_C_ref_A_RW, verbose_level >= 1);
+    float maximum_error_A_RW = 0.0f;
+    uint64_t error_count_A_RW = check_result(m, n, h_C_result, h_C_ref_A_RW, &maximum_error_A_RW, 5e-3, verbose_level >= 1);
+    float error_rate_A_RW = static_cast<float>(error_count_A_RW) / h_C_result.size();
     if(error_count_A_RW == 0) {
       printf("oft kernel result matches A_RW reference result!\n");
     } else {
       printf("oft kernel result does NOT match A_RW reference result for %lu/%lu entries\n", error_count_A_RW, h_C_result.size());
+      printf("Error rate: %.2f%%\n", error_rate_A_RW * 100.0);
+      printf("Maximum error: %.5f\n", maximum_error_A_RW);
       // return 1;
     }
+    printf("\n\n");
 
     if (program.get<bool>("--correctness_cpu")) {
       // check the correctness of the oft kernel against CPU reference
       printf("Checking against CPU reference result...\n");
       thrust::fill(h_C.begin(), h_C.end(), static_cast<half>(-1.0f));
       test_funcs["cpu_oft_tn"](); // compute the CPU reference result
-      uint64_t error_count_cpu = check_result(m, n, h_C_result, h_C, verbose_level >= 1);
+      float maximum_error_cpu = 0.0f;
+      uint64_t error_count_cpu = check_result(m, n, h_C_result, h_C, &maximum_error_cpu, 5e-3, verbose_level >= 1);
       if(error_count_cpu == 0) {
         printf("oft kernel result matches CPU reference result!\n");
       } else {
         printf("oft kernel result does NOT match CPU reference result for %lu/%lu entries\n", error_count_cpu, h_C_result.size());
+        printf("Error rate: %.2f%%\n", static_cast<float>(error_count_cpu) / h_C_result.size() * 100.0);
+        printf("Maximum error: %.5f\n", maximum_error_cpu);
         // return 1;
       }
+      printf("\n\n");
     }
   }
   #endif // USE_CUBLAS
