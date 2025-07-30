@@ -401,9 +401,9 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     Tensor mB = make_tensor(make_gmem_ptr(B), layout_b); // (N,K)
     Tensor mC = make_tensor(make_gmem_ptr(C), layout_c); // (M,N)
 
-    // auto grid_coord = z_curve(grid_shape, blockIdx.x);
-    auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
-                                 blockIdx.x % get<1>(grid_shape)); // (m,n)
+    auto grid_coord = z_curve(grid_shape, blockIdx.x);
+    // auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
+    //                              blockIdx.x % get<1>(grid_shape)); // (m,n)
     auto cta_coord =  append<3>(grid_coord, _);
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)
