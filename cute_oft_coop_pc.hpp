@@ -338,17 +338,11 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     CUTE_STATIC_ASSERT_V(rank(cta_tiler) == Int<3>{}); // (BLK_M, BLK_N_GROUPS, BLK_K_BLOCKS)
     // CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
-    CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == _0{}); // Ensure the N dimension of the CTA tiler is divisible by group_sz
+    CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == _0{} || group_sz % size<1>(cta_tiler) == _0{}); // Ensure the N dimension of the CTA tiler is divisible by group_sz
     CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % reconn_sz == _0{}); // Ensure the K dimension of the CTA tiler is divisible by reconn_sz
-    auto blocks_tiler = make_shape(
-        size<0>(cta_tiler),                    // BLK_M
-        size<1>(cta_tiler) / group_sz,         // BLK_N_GROUPS
-        size<2>(cta_tiler) / reconn_sz          // BLK_K_BLOCKS
-    );
-    
-    auto smem_atom = get_smem_atom(size<2>(cta_tiler));
+    auto cta_n_groups = max(size<1>(cta_tiler) / group_sz, _1{}); // Number of groups in N dimension
 
-    
+    auto smem_atom = get_smem_atom(size<2>(cta_tiler));
     CUTE_STATIC_ASSERT_V(size<1>(smem_atom) == size<2>(cta_tiler)); // Ensure the shared memory atom size matches the K dimension of the CTA tiler
  
     auto sA_layout = coalesce(tile_to_shape(
@@ -360,13 +354,13 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
 
-    auto ar_smem_atom = get_smem_atom<false>(reconn_sz * size<1>(blocks_tiler));
+    auto ar_smem_atom = get_smem_atom<false>(reconn_sz * cta_n_groups);
     // for storing the intermediate result of AR
     auto sAR_layout = coalesce(tile_to_shape(
         ar_smem_atom,
         make_shape(
             size<0>(cta_tiler), // BLK_M
-            reconn_sz * size<1>(blocks_tiler)
+            reconn_sz * cta_n_groups
         )
     ), make_tuple(_1{}, _1{})); // (BLK_M, RECONN_SZ)
 
@@ -382,7 +376,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     auto sR_layout = coalesce(tile_to_shape(
         smem_atom,
         make_shape(
-            size<1>(blocks_tiler) * reconn_sz,
+            cta_n_groups * reconn_sz,
             size<2>(cta_tiler),
             pipeline
             )
@@ -414,9 +408,9 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1,X>{});  // (BLK_M,BLK_N)
     Tensor gR = local_tile(mR,
         make_shape(
-            size<1>(blocks_tiler) * reconn_sz,
+            cta_n_groups * reconn_sz,
             size<2>(cta_tiler)
-        ), make_coord(get<1>(cta_coord), _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
+        ), make_coord(get<1>(cta_coord) * ratio(size<1>(cta_tiler), max(size<1>(cta_tiler), group_sz)), _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
     
     int thread_idx = threadIdx.x;
     int stage1_threads = size(warp_layout_stage1) * 32;

@@ -36,16 +36,14 @@ namespace cute {
   template <>
   struct Params <half, half> {
     static const unsigned int bM = 256;
-    static const unsigned int group_size = 64;
+    static const unsigned int group_size = 256;
     static const unsigned int reconn_sz = 8;
-    static const unsigned int bN_group = 2;
-    static const unsigned int bK_block = 2;
-    static const unsigned int bN = bN_group * group_size;
-    static const unsigned int bK = bK_block * reconn_sz;
+    static const unsigned int bN = 128;
+    static const unsigned int bK = 16;
     static const unsigned int bP = 3;
     static const bool block_tiling_copy = true;
     using warp_layout1 = Layout<Shape<Int<2>>>;
-    using warp_layout2 = Layout<Shape<Int<4>, Int<2>>>;
+    using warp_layout2 = Layout<Shape<Int<2>, Int<4>>>;
     // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
     // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
   };
@@ -111,10 +109,9 @@ void oft_tn(int m, int n, int k,
   auto group_size = Int<CurrParams::group_size>{};
   auto reconn_sz = Int<CurrParams::reconn_sz>{};
   auto bM = Int<CurrParams::bM>{};
-  auto bN_group = Int<CurrParams::bN_group>{};
-  auto bN = bN_group * group_size;
-  auto bK_block = Int<CurrParams::bK_block>{};
-  auto bK = bK_block * reconn_sz;
+  auto bN = Int<CurrParams::bN>{};
+  auto bK = Int<CurrParams::bK>{};
+  auto bN_group = max(bN / group_size, _1{});
   auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
   auto bP = Int<CurrParams::bP>{};  // Pipeline
   int n_groups = N / group_size;
