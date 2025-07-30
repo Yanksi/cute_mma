@@ -60,10 +60,10 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
         logical_divide(
             sAR,
             make_tile(cta_atom_layout_m)
-        )( // (((N_WARPS, 8), REST_M), RECONN_SZ * N_GROUPS)
-            make_coord(make_coord(warp_idx, _), _), _
-        ) // (8, REST_M, RECONN_SZ * N_GROUPS)
-    ); // (WARP_M_REGION, RECONN_SZ * N_GROUPS)
+        )( // (((N_WARPS, 8), REST_M), RECONN_SZ * N_GROUPS, PIPELINE)
+            make_coord(make_coord(warp_idx, _), _), _, _
+        ) // (8, REST_M, RECONN_SZ * N_GROUPS, PIPELINE)
+    ); // (WARP_M_REGION, RECONN_SZ * N_GROUPS, PIPELINE)
 
     CUTE_STATIC_ASSERT_V(size<0>(sA_warp_atom) == size<0>(sAR_warp_atom));
     CUTE_STATIC_ASSERT_V(size<0>(sR_warp_atom) == size<1>(sAR_warp_atom));
@@ -80,11 +80,11 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     ThrMMA thr_mma1 = single_warp_mma1.get_slice(lane_idx);
     Tensor tCsA = thr_mma1.partition_A(sA_warp_atom); // (MMA, MMA_M, MMA_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tCsR = thr_mma1.partition_B(sR_warp_atom); // (MMA, MMA_N, MMA_K, BLOCKS_ALONG_K, PIPELINE)
-    Tensor tCsAR = thr_mma1.partition_C(sAR_warp_atom); // (MMA, MMA_M, MMA_N)
+    Tensor tCsAR = thr_mma1.partition_C(sAR_warp_atom); // (MMA, MMA_M, MMA_N, PIPELINE)
 
     Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_,_,_,_0{},_0{})); // (MMA, MMA_M, MMA_K)
     Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_,_,_,_0{},_0{})); // (MMA, MMA_N, MMA_K)
-    Tensor tCrAR = thr_mma1.make_fragment_C(tCsAR); // (MMA, MMA_M, MMA_N)
+    Tensor tCrAR = thr_mma1.make_fragment_C(tCsAR(_,_,_,_0{})); // (MMA, MMA_M, MMA_N)
 
     using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
     using s2r_atom_R = Copy_Atom<SM75_U32x1_LDSM_N, half_t>;
@@ -113,6 +113,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
         if (thread_idx < size(copy_r)) {
             copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,k_pipe));
         }
+        __syncwarp();
         cp_async_fence();
         --k_tile_count;
         if (k_tile_count > 0) { ++k_tile_next; }
@@ -129,6 +130,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
                 // Only copy R if the threadIdx.x is within the range of copy_r
                 copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,smem_pipe_write));
             }
+            __syncwarp();
             cp_async_fence();
         }
         cp_async_wait<K_PIPE_MAX-1>();
@@ -146,7 +148,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
             asm volatile("bar.sync 2, %0;\n"
                                 :
                                 : "n"(n_threads_total)); // wait for the previous data to be consumed
-            copy(tCrAR, tCsAR); // copy the intermediate result into shared memory
+            copy(AutoVectorizingCopyWithAssumedAlignment<32>{}, tCrAR, tCsAR(_,_,_,_0{})); // copy the intermediate result into shared memory
             asm volatile("bar.arrive 1, %0;\n"
                                 :
                                 : "n"(n_threads_total)); // signal that the data is ready
@@ -206,10 +208,10 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
                 cta_atom_layout_m,
                 make_layout(reconn_sz)
             )
-        )( // (((M_WARPS, 8), REST_M), (RECONN_SZ, N_GROUPS))
-            make_coord(make_coord(warp_m, _), _), make_coord(_, warp_group_id)
-        ) // (8, REST_M, RECONN_SZ)
-    ); // (WARP_M_REGION, RECONN_SZ)
+        )( // (((M_WARPS, 8), REST_M), (RECONN_SZ, N_GROUPS), PIPELINE)
+            make_coord(make_coord(warp_m, _), _), make_coord(_, warp_group_id), _
+        ) // (8, REST_M, RECONN_SZ, PIPELINE)
+    ); // (WARP_M_REGION, RECONN_SZ, PIPELINE)
 
     Tensor sB_warp_atom = logical_divide(
         sB,
@@ -241,11 +243,11 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
     );
 
     ThrMMA thr_mma2 = single_warp_mma2.get_slice(lane_idx);
-    Tensor tCsAR = thr_mma2.partition_A(sAR_warp_atom); // (MMA, MMA_M, MMA_K)
+    Tensor tCsAR = thr_mma2.partition_A(sAR_warp_atom); // (MMA, MMA_M, MMA_K, PIPELINE)
     Tensor tCsB  = thr_mma2.partition_B(sB_warp_atom);  // (MMA, MMA_N, MMA_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tCgC  = thr_mma2.partition_C(gC_warp);       // (MMA, MMA_M, MMA_N)
     
-    Tensor tCrAR = thr_mma2.make_fragment_A(tCsAR); // (MMA, MMA_M, MMA_K)
+    Tensor tCrAR = thr_mma2.make_fragment_A(tCsAR(_,_,_,_0{})); // (MMA, MMA_M, MMA_K)
     Tensor tCrB  = thr_mma2.make_fragment_B(tCsB(_, _, _, _0{}, _0{})); // (MMA, MMA_N, MMA_K)
     Tensor tCrC  = thr_mma2.make_fragment_C(tCgC); // (MMA, MMA_M, MMA_N)
     clear(tCrC); // Clear the accumulators
@@ -255,7 +257,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
 
     TiledCopy s2r_copy_ar = make_tiled_copy_A(s2r_atom_AR{}, single_warp_mma2);
     ThrCopy s2r_thr_copy_ar = s2r_copy_ar.get_slice(lane_idx);
-    Tensor tXsAR = s2r_thr_copy_ar.partition_S(sAR_warp_atom); // (CPY, CPY_M, CPY_K)
+    Tensor tXsAR = s2r_thr_copy_ar.partition_S(sAR_warp_atom); // (CPY, CPY_M, CPY_K, PIPELINE)
     Tensor tXrAR = s2r_thr_copy_ar.retile_D(tCrAR); // (CPY, CPY_M, CPY_K)
 
     TiledCopy s2r_copy_b = make_tiled_copy_B(s2r_atom_B{}, single_warp_mma2);
@@ -303,7 +305,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
             asm volatile("bar.sync 1, %0;\n"
                                 :
                                 : "n"(n_threads_total));
-            copy(s2r_atom_AR{}, tXsAR, tXrAR);
+            copy(s2r_atom_AR{}, tXsAR(_,_,_,_0{}), tXrAR);
             asm volatile("bar.arrive 2, %0;\n"
                                 :
                                 : "n"(n_threads_total)); // signal the producer
@@ -322,13 +324,13 @@ template <class GridShape, class CtaTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize,
           class BLayout, class TiledCopyB,
-          class CLayout, class WarpLayoutStage1, class WarpLayoutStage2, class Pipeline>
+          class CLayout, class WarpLayoutStage1, class WarpLayoutStage2, class Pipeline1, class Pipeline2>
 __global__ static __launch_bounds__(decltype((size(WarpLayoutStage1{}) + size(WarpLayoutStage2{})) * cute::_32{})::value)
 void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
                 half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
-                half       *C, CLayout layout_c, WarpLayoutStage1 warp_layout_stage1, WarpLayoutStage2 warp_layout_stage2, Pipeline pipeline)
+                half       *C, CLayout layout_c, WarpLayoutStage1 warp_layout_stage1, WarpLayoutStage2 warp_layout_stage2, Pipeline1 pipeline1, Pipeline2 pipeline2)
 {
     using namespace cute;
 
@@ -350,7 +352,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             size<0>(cta_tiler), // BLK_M
             size<2>(cta_tiler), // BLK_K
-            pipeline            // PIPE
+            pipeline1           // PIPE
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
 
@@ -360,7 +362,8 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         ar_smem_atom,
         make_shape(
             size<0>(cta_tiler), // BLK_M
-            reconn_sz * cta_n_groups
+            reconn_sz * cta_n_groups,
+            pipeline2
         )
     ), make_tuple(_1{}, _1{})); // (BLK_M, RECONN_SZ)
 
@@ -369,7 +372,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             size<1>(cta_tiler), // BLK_N
             size<2>(cta_tiler), // BLK_K
-            pipeline            // PIPE
+            pipeline1           // PIPE
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_N, BLK_K, PIPE)
 
@@ -378,7 +381,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             cta_n_groups * reconn_sz,
             size<2>(cta_tiler),
-            pipeline
+            pipeline1
             )
         ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
 

@@ -40,7 +40,8 @@ namespace cute {
     static const unsigned int reconn_sz = 8;
     static const unsigned int bN = 128;
     static const unsigned int bK = 16;
-    static const unsigned int bP = 3;
+    static const unsigned int bP1 = 3;
+    static const unsigned int bP2 = 1;
     static const bool block_tiling_copy = true;
     using warp_layout1 = Layout<Shape<Int<2>>>;
     using warp_layout2 = Layout<Shape<Int<2>, Int<4>>>;
@@ -113,7 +114,8 @@ void oft_tn(int m, int n, int k,
   auto bK = Int<CurrParams::bK>{};
   auto bN_group = max(bN / group_size, _1{});
   auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
-  auto bP = Int<CurrParams::bP>{};  // Pipeline
+  auto bP1 = Int<CurrParams::bP1>{};  // Pipeline1
+  auto bP2 = Int<CurrParams::bP2>{};  // Pipeline2
   int n_groups = N / group_size;
   auto warp_layout1 = typename CurrParams::warp_layout1{};
   auto warp_layout2 = typename CurrParams::warp_layout2{};
@@ -156,7 +158,7 @@ void oft_tn(int m, int n, int k,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,
        B, B_layout, copyB,
-       C, C_layout, warp_layout1, warp_layout2, bP);
+       C, C_layout, warp_layout1, warp_layout2, bP1, bP2);
 }
 
 uint64_t check_result(
@@ -169,23 +171,19 @@ uint64_t check_result(
 ) {
   using namespace cute;
   uint64_t error_count = 0;
+  float _max_error = 0.0f;
   auto h_C_layout = make_layout(
     make_shape(m, n),
     LayoutRight{}
   );
   bool *correctness_mat = new bool[m * n];
 
+  #pragma omp parallel for reduction(+:error_count) reduction(max:_max_error)
   for (int i = 0; i < h_C_result.size(); ++i) {
     float ref_val = static_cast<float>(h_C_ref[i]);
     float result_val = static_cast<float>(h_C_result[i]);
-    if (result_val < 0.0f) {
-      printf("Result value is negative, which is unexpected. "
-             "This might indicate an error in the computation or initialization.");
-      delete[] correctness_mat;
-      return 0;
-    }
     float error = abs((ref_val - result_val) / ref_val);
-    *maximum_error = max(*maximum_error, error);
+    _max_error = max(_max_error, error);
     if (error > error_threshold) {
       auto coord = h_C_layout.get_hier_coord(i);
       correctness_mat[i] = false;
@@ -194,6 +192,8 @@ uint64_t check_result(
       correctness_mat[i] = true;
     }
   }
+  
+  *maximum_error = _max_error;
   if (verbose) {
     Tensor C_result = make_tensor(h_C_result.data(), h_C_layout);
     printf("Result Mat:\n");
@@ -326,6 +326,7 @@ int main(int argc, char** argv)
   int zo_init = program.get<bool>("--01init");
   std::srand(static_cast<unsigned int>(random_seed));
 
+  #pragma omp parallel for
   for (int i = 0; i < size<0>(h_A_tensor); ++i) {
     for (int j = 0; j < size<1>(h_A_tensor); ++j) {
       if (zo_init) {
@@ -338,6 +339,7 @@ int main(int argc, char** argv)
     }
   }
 
+  #pragma omp parallel for
   for (int i = 0; i < size<0>(h_B_tensor); ++i) {
     for (int j = 0; j < size<1>(h_B_tensor); ++j) {
       if (zo_init) {
@@ -355,11 +357,17 @@ int main(int argc, char** argv)
   for (int i = 0; i < reconn_sz; ++i) {
     shuffle_idx.push_back(i);
   }
-  for (int i = 0; i < size<1>(h_R_4d); ++i) {
-    std::shuffle(std::begin(shuffle_idx), std::end(shuffle_idx), std::mt19937{std::random_device{}()});
-    for (int j = 0; j < reconn_sz; ++j) {
-      // shuffle the indices to create a more complex pattern
-      h_R_4d(make_coord(j, shuffle_idx[j]), i) = static_cast<half>(1.0f);
+  #pragma omp parallel 
+  {
+    std::vector<int> shuffle_idx_local = shuffle_idx; // Each thread gets its own copy
+    std::mt19937 rng{std::random_device{}()}; // Each thread gets its own random generator
+    #pragma omp for
+    for (int i = 0; i < size<1>(h_R_4d); ++i) {
+      std::shuffle(std::begin(shuffle_idx_local), std::end(shuffle_idx_local), rng);
+      for (int j = 0; j < reconn_sz; ++j) {
+        // shuffle the indices to create a more complex pattern
+        h_R_4d(make_coord(j, shuffle_idx_local[j]), i) = static_cast<half>(1.0f);
+      }
     }
   }
 
