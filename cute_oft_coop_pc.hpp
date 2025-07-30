@@ -412,7 +412,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             size<1>(blocks_tiler) * reconn_sz,
             size<2>(cta_tiler)
-        ), make_coord(blockIdx.y, _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
+        ), make_coord(get<1>(cta_coord), _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
     
     int thread_idx = threadIdx.x;
     int stage1_threads = size(warp_layout_stage1) * 32;
