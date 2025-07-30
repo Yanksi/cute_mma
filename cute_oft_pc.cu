@@ -36,9 +36,9 @@ namespace cute {
   template <>
   struct Params <half, half> {
     static const unsigned int bM = 256;
-    static const unsigned int group_size = 128;
+    static const unsigned int group_size = 64;
     static const unsigned int reconn_sz = 8;
-    static const unsigned int bN_group = 1;
+    static const unsigned int bN_group = 2;
     static const unsigned int bK_block = 2;
     static const unsigned int bN = bN_group * group_size;
     static const unsigned int bK = bK_block * reconn_sz;
@@ -108,14 +108,13 @@ void oft_tn(int m, int n, int k,
   auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
   // Define CTA tile sizes (static)
-  auto group_size = Int<CurrParams::group_size>{}; // Group size for the block tiling
-  auto reconn_sz = Int<CurrParams::reconn_sz>{}; // Reconnection size for the block tiling
+  auto group_size = Int<CurrParams::group_size>{};
+  auto reconn_sz = Int<CurrParams::reconn_sz>{};
   auto bM = Int<CurrParams::bM>{};
   auto bN_group = Int<CurrParams::bN_group>{};
   auto bN = bN_group * group_size;
   auto bK_block = Int<CurrParams::bK_block>{};
   auto bK = bK_block * reconn_sz;
-  auto blocks_tiler = make_shape(bM, bN_group, bK_block);                   // (BLK_M, BLK_N, BLK_K)
   auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
   auto bP = Int<CurrParams::bP>{};  // Pipeline
   int n_groups = N / group_size;

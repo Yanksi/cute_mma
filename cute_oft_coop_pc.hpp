@@ -46,15 +46,6 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
         ) // (8, REST_M, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
     ); // (WARP_M_REGION, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
 
-    Tensor sAR_warp_atom = group_modes<0,2>(
-        logical_divide(
-            sAR,
-            make_tile(cta_atom_layout_m)
-        )( // (((N_WARPS, 8), REST_M), RECONN_SZ * N_GROUPS)
-            make_coord(make_coord(warp_idx, _), _), _
-        ) // (8, REST_M, RECONN_SZ * N_GROUPS)
-    ); // (WARP_M_REGION, RECONN_SZ * N_GROUPS)
-
     Tensor sR_warp_atom = logical_divide(
         sR,
         make_tile(
@@ -64,13 +55,26 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     )( // (RECONN_SZ * N_GROUPS, (RECONN_SZ, BLOCKS_ALONG_K), PIPELINE)
         _, make_coord(_,_), _
     ); // (RECONN_SZ * N_GROUPS, RECONN_SZ, BLOCKS_ALONG_K, PIPELINE)
+
+    Tensor sAR_warp_atom = group_modes<0,2>(
+        logical_divide(
+            sAR,
+            make_tile(cta_atom_layout_m)
+        )( // (((N_WARPS, 8), REST_M), RECONN_SZ * N_GROUPS)
+            make_coord(make_coord(warp_idx, _), _), _
+        ) // (8, REST_M, RECONN_SZ * N_GROUPS)
+    ); // (WARP_M_REGION, RECONN_SZ * N_GROUPS)
+
+    CUTE_STATIC_ASSERT_V(size<0>(sA_warp_atom) == size<0>(sAR_warp_atom));
+    CUTE_STATIC_ASSERT_V(size<0>(sR_warp_atom) == size<1>(sAR_warp_atom));
+
     
     using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
 
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
         make_layout(make_shape(_1{}, _1{})),
-        Tile<decltype(size<0>(sA_warp_atom)), decltype(reconn_sz)>{}
+        Tile<decltype(size<0>(sAR_warp_atom)), decltype(size<1>(sAR_warp_atom))>{}
     );
 
     ThrMMA thr_mma1 = single_warp_mma1.get_slice(lane_idx);
@@ -78,8 +82,8 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     Tensor tCsR = thr_mma1.partition_B(sR_warp_atom); // (MMA, MMA_N, MMA_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tCsAR = thr_mma1.partition_C(sAR_warp_atom); // (MMA, MMA_M, MMA_N)
 
-    Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_, _, _, _0{}, _0{})); // (MMA, MMA_M, MMA_K)
-    Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_, _, _, _0{}, _0{})); // (MMA, MMA_N, MMA_K)
+    Tensor tCrA = thr_mma1.make_fragment_A(tCsA(_,_,_,_0{},_0{})); // (MMA, MMA_M, MMA_K)
+    Tensor tCrR = thr_mma1.make_fragment_B(tCsR(_,_,_,_0{},_0{})); // (MMA, MMA_N, MMA_K)
     Tensor tCrAR = thr_mma1.make_fragment_C(tCsAR); // (MMA, MMA_M, MMA_N)
 
     using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
@@ -356,13 +360,13 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
 
-    auto ar_smem_atom = get_smem_atom(reconn_sz);
+    auto ar_smem_atom = get_smem_atom<false>(reconn_sz * size<1>(blocks_tiler));
     // for storing the intermediate result of AR
     auto sAR_layout = coalesce(tile_to_shape(
         ar_smem_atom,
         make_shape(
             size<0>(cta_tiler), // BLK_M
-            reconn_sz
+            reconn_sz * size<1>(blocks_tiler)
         )
     ), make_tuple(_1{}, _1{})); // (BLK_M, RECONN_SZ)
 
