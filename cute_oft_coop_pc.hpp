@@ -106,7 +106,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
         copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
-        if (lane_idx < size(copy_r)) {
+        if (thread_idx < size(copy_r)) {
             copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,k_pipe));
         }
         cp_async_fence();
@@ -121,7 +121,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
         Tensor tXsR_p = tXsR(_,_,_,_,smem_pipe_read);
         if (k_tile_count > 0) {
             copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,smem_pipe_write));
-            if (lane_idx < size(copy_r)) {
+            if (thread_idx < size(copy_r)) {
                 // Only copy R if the threadIdx.x is within the range of copy_r
                 copy(copy_r, tRgR(_,_,_,k_tile_next), tRsR(_,_,_,smem_pipe_write));
             }
@@ -401,9 +401,9 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     Tensor mB = make_tensor(make_gmem_ptr(B), layout_b); // (N,K)
     Tensor mC = make_tensor(make_gmem_ptr(C), layout_c); // (M,N)
 
-    auto grid_coord = z_curve(grid_shape, blockIdx.x);
-    // auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
-    //                              blockIdx.x % get<1>(grid_shape)); // (m,n)
+    // auto grid_coord = z_curve(grid_shape, blockIdx.x);
+    auto grid_coord = make_tuple(blockIdx.x / get<1>(grid_shape),
+                                 blockIdx.x % get<1>(grid_shape)); // (m,n)
     auto cta_coord =  append<3>(grid_coord, _);
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1,X,_1>{});  // (BLK_M,BLK_K,k)
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X,_1,_1>{});  // (BLK_N,BLK_K,k)

@@ -35,8 +35,8 @@ namespace cute {
 
   template <>
   struct Params <half, half> {
-    static const unsigned int bM = 128;
-    static const unsigned int group_size = 256;
+    static const unsigned int bM = 256;
+    static const unsigned int group_size = 128;
     static const unsigned int reconn_sz = 8;
     static const unsigned int bN_group = 1;
     static const unsigned int bK_block = 2;
@@ -44,7 +44,7 @@ namespace cute {
     static const unsigned int bK = bK_block * reconn_sz;
     static const unsigned int bP = 3;
     static const bool block_tiling_copy = true;
-    using warp_layout1 = Layout<Shape<Int<4>>>;
+    using warp_layout1 = Layout<Shape<Int<2>>>;
     using warp_layout2 = Layout<Shape<Int<4>, Int<2>>>;
     // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
     // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
@@ -132,7 +132,7 @@ void oft_tn(int m, int n, int k,
     make_shape(N, K),
     make_stride(ldB, Int<1>{})
   );
-
+ 
   auto R_layout = make_layout(
     make_shape(n_groups * reconn_sz, K),
     make_stride(ldR, Int<1>{})
@@ -177,25 +177,39 @@ uint64_t check_result(
     make_shape(m, n),
     LayoutRight{}
   );
+  bool *correctness_mat = new bool[m * n];
+
   for (int i = 0; i < h_C_result.size(); ++i) {
     float ref_val = static_cast<float>(h_C_ref[i]);
     float result_val = static_cast<float>(h_C_result[i]);
     if (result_val < 0.0f) {
       printf("Result value is negative, which is unexpected. "
              "This might indicate an error in the computation or initialization.");
-      return -1;
+      delete[] correctness_mat;
+      return 0;
     }
     float error = abs((ref_val - result_val) / ref_val);
     *maximum_error = max(*maximum_error, error);
     if (error > error_threshold) {
       auto coord = h_C_layout.get_hier_coord(i);
-      if (verbose) {
-        printf("Mismatch at (%d, %d): %f != %f\n", get<0>(coord), get<1>(coord),
-               static_cast<float>(h_C_result[i]), static_cast<float>(h_C_ref[i]));
-      }
+      correctness_mat[i] = false;
       error_count++;
+    } else {
+      correctness_mat[i] = true;
     }
   }
+  if (verbose) {
+    Tensor C_result = make_tensor(h_C_result.data(), h_C_layout);
+    printf("Result Mat:\n");
+    print_tensor(C_result); printf("\n");
+    Tensor C_ref = make_tensor(h_C_ref.data(), h_C_layout);
+    printf("Reference Mat:\n");
+    print_tensor(C_ref); printf("\n");
+    Tensor correctness_tensor = make_tensor(correctness_mat, h_C_layout);
+    printf("Correctness Mat:\n");
+    print_tensor(correctness_tensor); printf("\n");
+  }
+  delete[] correctness_mat;
   return error_count;
 }
 
@@ -214,6 +228,10 @@ int main(int argc, char** argv)
   program.add_argument("-k", "--k")
     .help("Number of columns in matrix A and rows in matrix B")
     .default_value(4096)
+    .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("-w", "--warmup_iterations")
+    .help("Number of warmup iterations to run before timing")
+    .default_value(10)
     .action([](const std::string& value) { return std::stoi(value); });
   program.add_argument("-t", "--timing_iterations")
     .help("Number of iterations to time")
@@ -270,6 +288,7 @@ int main(int argc, char** argv)
   int m = program.get<int>("--m");
   int n = program.get<int>("--n");
   int k = program.get<int>("--k");
+  int warmup_iterations = program.get<int>("--warmup_iterations");
   int timing_iterations = program.get<int>("--timing_iterations");
 
   #ifdef USE_CUBLAS
@@ -351,28 +370,31 @@ int main(int argc, char** argv)
   #ifdef DEBUG
   if (verbose_level >= 2) {
     printf("A:\n");
-    for (int i = 0; i < size<0>(h_A_tensor); ++i) {
-      for (int j = 0; j < size<1>(h_A_tensor); ++j) {
-        printf("%6.3f ", static_cast<float>(h_A_tensor(i, j)));
-      }
-      printf("\n");
-    }
+    print_tensor(h_A_tensor);print("\n");
+    // for (int i = 0; i < size<0>(h_A_tensor); ++i) {
+    //   for (int j = 0; j < size<1>(h_A_tensor); ++j) {
+    //     printf("%6.3f ", static_cast<float>(h_A_tensor(i, j)));
+    //   }
+    //   printf("\n");
+    // }
 
     printf("R:\n");
-    for (int i = 0; i < size<0>(h_R_tensor); ++i) {
-      for (int j = 0; j < size<1>(h_R_tensor); ++j) {
-        printf("%6.3f ", static_cast<float>(h_R_tensor(i, j)));
-      }
-      printf("\n");
-    }
+    print_tensor(h_R_tensor);print("\n");
+    // for (int i = 0; i < size<0>(h_R_tensor); ++i) {
+    //   for (int j = 0; j < size<1>(h_R_tensor); ++j) {
+    //     printf("%6.3f ", static_cast<float>(h_R_tensor(i, j)));
+    //   }
+    //   printf("\n");
+    // }
 
     printf("B:\n");
-    for (int i = 0; i < size<0>(h_B_tensor); ++i) {
-      for (int j = 0; j < size<1>(h_B_tensor); ++j) {
-        printf("%6.3f ", static_cast<float>(h_B_tensor(i, j)));
-      }
-      printf("\n");
-    }
+    print_tensor(h_B_tensor);print("\n");
+    // for (int i = 0; i < size<0>(h_B_tensor); ++i) {
+    //   for (int j = 0; j < size<1>(h_B_tensor); ++j) {
+    //     printf("%6.3f ", static_cast<float>(h_B_tensor(i, j)));
+    //   }
+    //   printf("\n");
+    // }
   }
   #endif // DEBUG
 
@@ -479,6 +501,10 @@ int main(int argc, char** argv)
   }
   #endif // USE_CUBLAS
 
+  for (int i = 0; i < warmup_iterations; ++i) {
+    test_func(); // run the warmup iterations
+  }
+
   if (timing_iterations <= 0) {
     return 0;
   }
@@ -492,7 +518,6 @@ int main(int argc, char** argv)
   double t_flops_AR_W_sparse = base_t_flops * program.get<double>("--sparse_speedup") + additional_t_AR_W;
   printf("Total TFLOPS (AR_W): %.5f, (AR_W_sparse): %.5f, (A_RW): %.5f\n",
          t_flops_AR_W, t_flops_AR_W_sparse, t_flops_A_RW);
-  test_func(); // run the test function once to ensure everything is set up correctly
   // Timing iterations
   GPU_Clock timer;
   timer.start();

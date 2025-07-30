@@ -38,7 +38,7 @@ auto warp_in_group_mapping(WARP_N warp_n, N_GROUPS n_groups, GROUP_SIZE group_sz
     }
 }
 
-template <int _k_width>
+template <bool swizzle = true, int _k_width>
 CUTE_HOST_DEVICE constexpr
 auto get_smem_atom(cute::Int<_k_width>) {
     using namespace cute;
@@ -53,13 +53,16 @@ auto get_smem_atom(cute::Int<_k_width>) {
     CUTE_STATIC_ASSERT_V(k_width == bit_floor(k_width)); // k_width must be a power of two
     constexpr auto n_blocks = k_width / _8{};
     constexpr auto permutation_bits = log_2(static_cast<unsigned int>(_k_width)) - _3{};
-    constexpr auto sw = Swizzle<permutation_bits, 6 - permutation_bits>{};
-    return composition(
-        sw, make_layout(
-            make_shape(_8{}, make_shape(_8{}, n_blocks)),
-            make_stride(_8{}, make_stride(_1{}, _64{}))
-        )
+    constexpr auto base_layout = make_layout(
+        make_shape(_8{}, make_shape(_8{}, n_blocks)),
+        make_stride(_8{}, make_stride(_1{}, _64{}))
     );
+    if constexpr (!swizzle) {
+        return base_layout;
+    } else {
+        constexpr auto sw = Swizzle<permutation_bits, 6 - permutation_bits>{};
+        return composition(sw, base_layout);
+    }
 }
 
 template <class CtaTiler, class ReconnSZ, class Pipeline>
