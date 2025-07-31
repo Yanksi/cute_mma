@@ -35,13 +35,13 @@ namespace cute {
 
   template <>
   struct Params <half, half> {
-    static const unsigned int bM = 256;
     static const unsigned int group_size = 256;
     static const unsigned int reconn_sz = 8;
-    static const unsigned int bN = 128;
+    static const unsigned int bM = 128;
+    static const unsigned int bN = 256;
     static const unsigned int bK = 16;
     static const unsigned int bP1 = 3;
-    static const unsigned int bP2 = 1;
+    static const unsigned int bP2 = 2;
     static const bool block_tiling_copy = true;
     using warp_layout1 = Layout<Shape<Int<2>>>;
     using warp_layout2 = Layout<Shape<Int<2>, Int<4>>>;
@@ -149,11 +149,13 @@ void oft_tn(int m, int n, int k,
   auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
   dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
 
+  uint32_t smem_size = get_smem_size(cta_tiler, group_size, reconn_sz, bP1, bP2);
+
   #ifdef DEBUG
   printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
          dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
   #endif
-  oft_device<<<dimGrid, dimBlock, 0, stream>>>
+  oft_device<<<dimGrid, dimBlock, smem_size, stream>>>
       (grid_shape, cta_tiler,
        A, A_layout, copyA,
        R, R_layout, copyR, group_size, reconn_sz,

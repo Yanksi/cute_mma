@@ -64,17 +64,3 @@ auto get_smem_atom(cute::Int<_k_width>) {
         return composition(sw, base_layout);
     }
 }
-
-template <class CtaTiler, class ReconnSZ, class Pipeline>
-size_t get_smem_size(CtaTiler cta_tiler, int group_sz, ReconnSZ reconn_sz, Pipeline pipeline) {
-    using namespace cute;
-    auto size_m = size<0>(cta_tiler);
-    auto size_n = size<1>(cta_tiler);
-    auto size_k = size<2>(cta_tiler);
-    int size_A = size_m * size_k * pipeline;
-    int size_B = size_n * size_k * pipeline;
-    int n_groups = max(size_n / group_sz, 1); // Number of groups in the N dimension
-    int size_R = reconn_sz * n_groups * size_k * pipeline;
-    int size_smem = size_A + size_B + size_R;
-    return size_smem * sizeof(half_t);
-}

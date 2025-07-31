@@ -2,6 +2,18 @@
 #include "cute_oft_util.hpp"
 #include "z_curve.hpp"
 
+template<class CTATiler, class GroupSize, class ReconnectSize, class Pipeline1, class Pipeline2>
+auto get_smem_size(CTATiler cta, GroupSize group_size, ReconnectSize reconn_sz, Pipeline1 pipe1, Pipeline2 pipe2)
+{
+    using namespace cute;
+    auto size_A = size<0>(cta) * size<2>(cta) * pipe1; // BLK_M * BLK_K * PIPE2
+    auto size_B = size<1>(cta) * size<2>(cta) * pipe1; // BLK_N * BLK_K * PIPE2
+    auto n_groups = max(size<1>(cta) / group_size, _1{}); // Number of groups in N dimension
+    auto size_R = n_groups * reconn_sz * size<2>(cta) * pipe1; // N_GROUPS * RECONN_SZ * BLK_K * PIPE2
+    auto size_AR = n_groups * reconn_sz * size<0>(cta) * pipe2; // N_GROUPS * RECONN_SZ * BLK_M * PIPE1
+    // Compute shared memory size based on the tiler and other parameters
+    return (size_A + size_B + size_R + size_AR) * sizeof(half);
+}
 
 template <class TensorGA, class TensorSA, class TiledCopyA,
           class TensorGR, class TensorSR, class TiledCopyR, class ReconnectSize,
@@ -107,6 +119,9 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     int smem_pipe_write = K_PIPE_MAX - 1;
     auto K_BLOCK_MAX = size<3>(tCsA);
 
+    auto K_PIPE2_MAX = size<3>(tCsAR);
+    int ar_pipe_write = 0;
+
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
         copy(copy_a, tAgA(_,_,_,k_tile_next), tAsA(_,_,_,k_pipe));
@@ -134,7 +149,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
             cp_async_fence();
         }
         cp_async_wait<K_PIPE_MAX-1>();
-        asm volatile("bar.sync 0, %0;\n"
+        asm volatile("bar.sync 14, %0;\n"
                             :
                             : "n"(n_threads1));
         // wait for the data to be ready in the smem
@@ -145,13 +160,15 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
             copy(s2r_atom_R{}, tXsR_p(_,_,_,j), tXrR);
             clear(tCrAR);
             gemm(single_warp_mma1, tCrA, tCrR, tCrAR);
-            asm volatile("bar.sync 2, %0;\n"
+            asm volatile("bar.sync %0, %1;\n"
                                 :
-                                : "n"(n_threads_total)); // wait for the previous data to be consumed
-            copy(AutoVectorizingCopyWithAssumedAlignment<32>{}, tCrAR, tCsAR(_,_,_,_0{})); // copy the intermediate result into shared memory
-            asm volatile("bar.arrive 1, %0;\n"
+                                : "r"(ar_pipe_write + K_PIPE2_MAX), "n"(n_threads_total)); // wait for the previous data to be consumed
+            copy(AutoVectorizingCopyWithAssumedAlignment<32>{}, tCrAR, tCsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
+            asm volatile("bar.arrive %0, %1;\n"
                                 :
-                                : "n"(n_threads_total)); // signal that the data is ready
+                                : "r"(ar_pipe_write), "n"(n_threads_total)); // signal that the data is ready
+            ++ar_pipe_write;
+            ar_pipe_write = (ar_pipe_write == K_PIPE2_MAX) ? 0 : ar_pipe_write; // wrap around the pipe index
         }
         --k_tile_count;
         ++k_tile_next;
@@ -271,6 +288,9 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
     int k_tile_count = size<3>(tBgB);
     int smem_pipe_write = K_PIPE_MAX - 1;
     auto K_BLOCK_MAX = size<3>(tCsB);
+
+    auto K_PIPE2_MAX = size<3>(tCsAR);
+    int ar_pipe_read = 0;
     
     CUTE_UNROLL
     for (int k_pipe = 0; k_pipe < K_PIPE_MAX - 1; ++k_pipe) {
@@ -280,9 +300,12 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         if (k_tile_count > 0) { ++k_tile_next; }
     }
 
-    asm volatile("bar.arrive 2, %0;\n"
+    CUTE_UNROLL
+    for (int bid = K_PIPE2_MAX; bid < K_PIPE2_MAX * 2; ++bid) {
+        asm volatile("bar.arrive %0, %1;\n"
                         :
-                        : "n"(n_threads_total)); // signal the producer that current threads are ready to consume data
+                        : "r"(bid), "n"(n_threads_total)); // signal the producer that current threads are ready to consume data
+    }
 
     CUTE_NO_UNROLL
     while (k_tile_count > -(K_PIPE_MAX - 1)) {
@@ -294,7 +317,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         cp_async_fence();
         // wait for the data to be ready in the smem
         cp_async_wait<K_PIPE_MAX-1>();
-        asm volatile("bar.sync 3, %0;\n"
+        asm volatile("bar.sync 15, %0;\n"
                             :
                             : "n"(n_threads2));
 
@@ -302,14 +325,16 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         for (int j = 0; j < K_BLOCK_MAX; ++j) {
             copy(s2r_atom_B{}, tXsB_p(_,_,_,j), tXrB);
             // wait for producer's data
-            asm volatile("bar.sync 1, %0;\n"
+            asm volatile("bar.sync %0, %1;\n"
                                 :
-                                : "n"(n_threads_total));
-            copy(s2r_atom_AR{}, tXsAR(_,_,_,_0{}), tXrAR);
-            asm volatile("bar.arrive 2, %0;\n"
+                                : "r"(ar_pipe_read), "n"(n_threads_total));
+            copy(s2r_atom_AR{}, tXsAR(_,_,_,ar_pipe_read), tXrAR);
+            asm volatile("bar.arrive %0, %1;\n"
                                 :
-                                : "n"(n_threads_total)); // signal the producer
+                                : "r"(ar_pipe_read + K_PIPE2_MAX), "n"(n_threads_total)); // signal the producer
             gemm(single_warp_mma2, tCrAR, tCrB, tCrC);
+            ++ar_pipe_read;
+            ar_pipe_read = (ar_pipe_read == K_PIPE2_MAX) ? 0 : ar_pipe_read; // wrap around the pipe index
         }
         --k_tile_count;
         ++k_tile_next;
@@ -386,10 +411,16 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
 
     // Shared memory buffers
-    __shared__ half smemA[cosize_v<decltype(sA_layout)>];
-    __shared__ half smemR[cosize_v<decltype(sR_layout)>];
-    __shared__ half smemB[cosize_v<decltype(sB_layout)>];
-    __shared__ half smemAR[cosize_v<decltype(sAR_layout)>];
+    extern __shared__ half smem[]; // Shared memory buffer
+    // Cast the shared memory buffer to half type
+    half* smemA = smem;
+    half* smemR = smemA + cosize_v<decltype(sA_layout)>;
+    half* smemB = smemR + cosize_v<decltype(sR_layout)>;
+    half* smemAR = smemB + cosize_v<decltype(sB_layout)>;
+    // __shared__ half smemA[cosize_v<decltype(sA_layout)>];
+    // __shared__ half smemR[cosize_v<decltype(sR_layout)>];
+    // __shared__ half smemB[cosize_v<decltype(sB_layout)>];
+    // __shared__ half smemAR[cosize_v<decltype(sAR_layout)>];
 
     Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout); // (BLK_M, BLK_K, PIPE)
     Tensor sR = make_tensor(make_smem_ptr(smemR), sR_layout); // (GROUP * R, BLOCK * R, PIPE)
