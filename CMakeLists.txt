@@ -47,14 +47,6 @@ if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
     target_compile_definitions(cute_oft_pc PRIVATE DEBUG)
 endif()
 
-add_executable(cute_oft cute_oft.cu)
-target_include_directories(cute_oft PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(cute_oft PRIVATE CUDA::cublas OpenMP::OpenMP_CXX)
-target_compile_definitions(cute_oft PRIVATE USE_CUBLAS)
-if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
-    target_compile_definitions(cute_oft PRIVATE DEBUG)
-endif()
-
 # for each .cu file in folder "playgrounds", create an executable
 file(GLOB PLAYGROUND_SOURCES "playgrounds/*.cu")
 foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})

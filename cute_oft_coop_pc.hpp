@@ -417,10 +417,6 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     half* smemR = smemA + cosize_v<decltype(sA_layout)>;
     half* smemB = smemR + cosize_v<decltype(sR_layout)>;
     half* smemAR = smemB + cosize_v<decltype(sB_layout)>;
-    // __shared__ half smemA[cosize_v<decltype(sA_layout)>];
-    // __shared__ half smemR[cosize_v<decltype(sR_layout)>];
-    // __shared__ half smemB[cosize_v<decltype(sB_layout)>];
-    // __shared__ half smemAR[cosize_v<decltype(sAR_layout)>];
 
     Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout); // (BLK_M, BLK_K, PIPE)
     Tensor sR = make_tensor(make_smem_ptr(smemR), sR_layout); // (GROUP * R, BLOCK * R, PIPE)
