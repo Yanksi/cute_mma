@@ -27,142 +27,6 @@
 #define mmax(a,b) ((a) > (b) ? (a) : (b))
 #define mmin(a,b) ((a) < (b) ? (a) : (b))
 
-namespace cute {
-  template <typename TO, typename TR>
-  struct Params {
-    static_assert(sizeof(TO) == 0, "This struct should not be used");
-  };
-
-  template <>
-  struct Params <half, half> {
-    static const unsigned int group_size = 256;
-    static const unsigned int reconn_sz = 8;
-    static const unsigned int bM = 128;
-    static const unsigned int bN = 256;
-    static const unsigned int bK = 16;
-    static const unsigned int bP1 = 3;
-    static const unsigned int bP2 = 2;
-    static const bool block_tiling_copy = true;
-    using warp_layout1 = Layout<Shape<Int<2>>>;
-    using warp_layout2 = Layout<Shape<Int<2>, Int<4>>>;
-    // using mma_atom = SM80_16x8x8_F16F16F16F16_TN;
-    // using s2r_atom = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
-  };
-
-  using CurrParams = Params<half, half>;
-}
-
-template <typename copy_as_t, typename ele_t, bool k_major, bool block_tiling,
-  typename _BM, typename _BK, typename _N_Threads>
-constexpr auto cp_layout(_BM bm, _BK bk, _N_Threads _total_threads) {
-  using namespace cute;
-  constexpr int vec_width = sizeof(copy_as_t) / sizeof(ele_t);
-  constexpr int total_elements = bm * bk;
-
-  constexpr int needed_threads = total_elements / vec_width;
-  CUTE_STATIC_ASSERT(total_elements % vec_width == 0, "total number of elements shall be divisible by the vector length");
-  constexpr int total_threads = mmin(_total_threads, needed_threads);
-
-  constexpr int elements_per_thread = total_elements / total_threads;
-  CUTE_STATIC_ASSERT(total_elements % total_threads == 0, "total number of elements shall be divisible by the number of threads using");
-  CUTE_STATIC_ASSERT(elements_per_thread % vec_width == 0, "number of elements handled by each thread should be divisible by the vector width");
-  constexpr int cp_width = (block_tiling) ? vec_width : elements_per_thread;
-  if constexpr (k_major) {
-    CUTE_STATIC_ASSERT(!block_tiling || bk % cp_width == 0);
-    CUTE_STATIC_ASSERT(block_tiling || (bk % cp_width == 0 || cp_width % bk == 0));
-    constexpr int threads_along_k = mmax(bk / cp_width, 1);
-    constexpr int threads_k_size = bk / threads_along_k;
-    constexpr int threads_m_size = mmax(cp_width / bk, 1);
-    constexpr int threads_along_m = total_threads / threads_along_k;
-    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
-                           make_layout(Shape<Int<threads_along_m>, Int<threads_along_k>>{}, LayoutRight{}),
-                          //  Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
-                           Layout<Shape<Int<threads_m_size>, Int<threads_k_size>>>{});
-  } else {
-    // As it not really possible to have copy width greater than bm, we don't need to check for that
-    CUTE_STATIC_ASSERT(bm % cp_width == 0);
-    constexpr int threads_along_m = bm / cp_width;
-    constexpr int threads_along_k = total_threads / threads_along_m;
-    // return make_tiled_copy(Copy_Atom<UniversalCopy<copy_as_t>, ele_t>{},
-    return make_tiled_copy(Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<copy_as_t>, ele_t>{},
-                           Layout<Shape<Int<threads_along_m>, Int<threads_along_k>>>{},
-                           Layout<Shape<Int<cp_width>, _1>>{});
-  }
-}
-
-// // Setup params for a TN GEMM, K-Major inputs
-void oft_tn(int m, int n, int k,
-        half const* A, int ldA,
-        half const* B, int ldB,
-        half const* R, int ldR,
-        half      * C, int ldC,
-        cudaStream_t stream = 0)
-{
-  using namespace cute;
-
-  // Define shapes (dynamic)
-  auto M = int(m);
-  auto N = int(n);
-  auto K = int(k);
-  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
-
-  // Define CTA tile sizes (static)
-  auto group_size = Int<CurrParams::group_size>{};
-  auto reconn_sz = Int<CurrParams::reconn_sz>{};
-  auto bM = Int<CurrParams::bM>{};
-  auto bN = Int<CurrParams::bN>{};
-  auto bK = Int<CurrParams::bK>{};
-  auto bN_group = max(bN / group_size, _1{});
-  auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
-  auto bP1 = Int<CurrParams::bP1>{};  // Pipeline1
-  auto bP2 = Int<CurrParams::bP2>{};  // Pipeline2
-  int n_groups = N / group_size;
-  auto warp_layout1 = typename CurrParams::warp_layout1{};
-  auto warp_layout2 = typename CurrParams::warp_layout2{};
-
-  // Define the gmem layouts
-  auto A_layout = make_layout(
-    make_shape(M, K),
-    make_stride(ldA, Int<1>{})
-  );
-
-  auto B_layout = make_layout(
-    make_shape(N, K),
-    make_stride(ldB, Int<1>{})
-  );
- 
-  auto R_layout = make_layout(
-    make_shape(n_groups * reconn_sz, K),
-    make_stride(ldR, Int<1>{})
-  );
-
-  auto C_layout = make_layout(
-    make_shape(M, N),
-    make_stride(ldC, Int<1>{})
-  );
-
-  TiledCopy copyA = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bM, bK, size(warp_layout1) * _32{});
-  TiledCopy copyR = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN_group * reconn_sz, bK, size(warp_layout1) * _32{});
-  TiledCopy copyB = cp_layout<uint128_t, half, true, CurrParams::block_tiling_copy>(bN, bK, size(warp_layout2) * _32{});
-
-  dim3 dimBlock((size(warp_layout1) + size(warp_layout2)) * _32{});
-  auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
-
-  uint32_t smem_size = get_smem_size(cta_tiler, group_size, reconn_sz, bP1, bP2);
-
-  #ifdef DEBUG
-  printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
-         dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
-  #endif
-  oft_device<<<dimGrid, dimBlock, smem_size, stream>>>
-      (grid_shape, cta_tiler,
-       A, A_layout, copyA,
-       R, R_layout, copyR, group_size, reconn_sz,
-       B, B_layout, copyB,
-       C, C_layout, warp_layout1, warp_layout2, bP1, bP2);
-}
-
 uint64_t check_result(
   int m, int n,
   thrust::host_vector<half>& h_C_result,
@@ -294,8 +158,8 @@ int main(int argc, char** argv)
   bool correctness_check = program.get<bool>("--correctness");
   #endif
 
-  int group_size = CurrParams::group_size; // group size for the block tiling
-  int reconn_sz = CurrParams::reconn_sz; // hardcoded reconnection size
+  int group_size = CurrKernelParams::group_size; // group size for the block tiling
+  int reconn_sz = CurrKernelParams::reconn_sz; // hardcoded reconnection size
 
   int n_groups = n / group_size; // number of groups for the block tiling
   int n_blocks = k / reconn_sz; // hardcoded reconnection size
@@ -411,7 +275,7 @@ int main(int argc, char** argv)
 
   std::map<std::string, std::function<void()>> test_funcs;
   test_funcs["oft_tn"] = [&]() {
-    oft_tn(m, n, k,
+    oft_tn<CurrKernelParams>(m, n, k,
       d_A.data().get(), k,
       d_B.data().get(), k,
       d_R.data().get(), k,

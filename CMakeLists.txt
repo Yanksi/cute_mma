@@ -39,7 +39,7 @@ set(COMMON_INCLUDE_DIRS
 add_executable(playground cute_playground.cu)
 target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
-add_executable(cute_oft_pc cute_oft_pc.cu)
+add_executable(cute_oft_pc cute_oft_pc.cu cute_oft_coop_pc.cu)
 target_include_directories(cute_oft_pc PRIVATE ${COMMON_INCLUDE_DIRS})
 target_link_libraries(cute_oft_pc PRIVATE CUDA::cublas OpenMP::OpenMP_CXX)
 target_compile_definitions(cute_oft_pc PRIVATE USE_CUBLAS)
