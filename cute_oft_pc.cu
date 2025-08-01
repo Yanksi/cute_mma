@@ -9,6 +9,7 @@
 #endif
 #include "cpu_oft.hpp"
 #include "z_curve.hpp"
+#include <omp.h>
 
 #include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
@@ -179,7 +180,7 @@ int main(int argc, char** argv)
   Tensor h_A_tensor = make_tensor(h_A.data(), make_shape(m, k), LayoutRight{});
   Tensor h_B_tensor = make_tensor(h_B.data(), make_shape(n, k), LayoutRight{});
   Tensor h_R_tensor = make_tensor(h_R.data(), make_shape(n_groups * reconn_sz, k), LayoutRight{});
-  Tensor h_R_4d = zipped_divide(
+  Tensor h_R_4d = flat_divide(
     h_R_tensor,
     make_tile(
       make_layout(reconn_sz), // hardcoded reconnection size
@@ -190,49 +191,46 @@ int main(int argc, char** argv)
   // set a time based random seed
   int random_seed = program.get<int>("--random_seed");
   int zo_init = program.get<bool>("--01init");
-  std::srand(static_cast<unsigned int>(random_seed));
 
-  #pragma omp parallel for
-  for (int i = 0; i < size<0>(h_A_tensor); ++i) {
-    for (int j = 0; j < size<1>(h_A_tensor); ++j) {
-      if (zo_init) {
-        // Initialize with 0s and 1s
-        h_A_tensor(i, j) = static_cast<half>(rand() % 2 * 1.0f);
-      } else {
-        // Initialize with random floats in the range [0, 1]
-        h_A_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
-      }
-    }
-  }
-
-  #pragma omp parallel for
-  for (int i = 0; i < size<0>(h_B_tensor); ++i) {
-    for (int j = 0; j < size<1>(h_B_tensor); ++j) {
-      if (zo_init) {
-        // Initialize with 0s and 1s
-        h_B_tensor(i, j) = static_cast<half>(rand() % 2 * 1.0f);
-      } else {
-        // Initialize with random floats in the range [0, 1]
-        h_B_tensor(i, j) = static_cast<half>( (rand() / double(RAND_MAX)) );
-      }
-    }
-  }
-
-  // int shuffle_idx[8] = {0, 1, 2, 3, 4, 5, 6, 7};
-  std::vector<int> shuffle_idx;
-  for (int i = 0; i < reconn_sz; ++i) {
-    shuffle_idx.push_back(i);
-  }
-  #pragma omp parallel 
+  #pragma omp parallel
   {
-    std::vector<int> shuffle_idx_local = shuffle_idx; // Each thread gets its own copy
-    std::mt19937 rng{std::random_device{}()}; // Each thread gets its own random generator
+    // Each thread gets its own random number generator seeded differently
+    std::mt19937 generator(random_seed + omp_get_thread_num());
+    std::uniform_real_distribution<double> distribution(0.0, 1.0);
     #pragma omp for
-    for (int i = 0; i < size<1>(h_R_4d); ++i) {
-      std::shuffle(std::begin(shuffle_idx_local), std::end(shuffle_idx_local), rng);
-      for (int j = 0; j < reconn_sz; ++j) {
-        // shuffle the indices to create a more complex pattern
-        h_R_4d(make_coord(j, shuffle_idx_local[j]), i) = static_cast<half>(1.0f);
+    for (int i = 0; i < h_A.size(); ++i) {
+      if (zo_init) {
+        // Initialize with 0s and 1s
+        h_A[i] = static_cast<half>(static_cast<int>(distribution(generator) * 2));
+      } else {
+        // Initialize with random floats in the range [0, 1]
+        h_A[i] = static_cast<half>(distribution(generator));
+      }
+    }
+
+    #pragma omp for
+    for (int i = 0; i < h_B.size(); ++i) {
+      if (zo_init) {
+        // Initialize with 0s and 1s
+        h_B[i] = static_cast<half>(static_cast<int>(distribution(generator) * 2));
+      } else {
+        // Initialize with random floats in the range [0, 1]
+        h_B[i] = static_cast<half>(distribution(generator));
+      }
+    }
+
+    std::vector<int> shuffle_idx;
+    for (int i = 0; i < reconn_sz; ++i) {
+      shuffle_idx.push_back(i);
+    }
+    #pragma omp for
+    for (int g = 0; g < size<1>(h_R_4d); ++g) {
+      for (int k = 0; k < size<2>(h_R_4d); ++k) {
+        std::shuffle(std::begin(shuffle_idx), std::end(shuffle_idx), generator);
+        for (int j = 0; j < reconn_sz; ++j) {
+          // shuffle the indices to create a more complex pattern
+          h_R_4d(j, shuffle_idx[j], g, k) = static_cast<half>(1.0f);
+        }
       }
     }
   }
@@ -241,30 +239,12 @@ int main(int argc, char** argv)
   if (verbose_level >= 2) {
     printf("A:\n");
     print_tensor(h_A_tensor);print("\n");
-    // for (int i = 0; i < size<0>(h_A_tensor); ++i) {
-    //   for (int j = 0; j < size<1>(h_A_tensor); ++j) {
-    //     printf("%6.3f ", static_cast<float>(h_A_tensor(i, j)));
-    //   }
-    //   printf("\n");
-    // }
 
     printf("R:\n");
     print_tensor(h_R_tensor);print("\n");
-    // for (int i = 0; i < size<0>(h_R_tensor); ++i) {
-    //   for (int j = 0; j < size<1>(h_R_tensor); ++j) {
-    //     printf("%6.3f ", static_cast<float>(h_R_tensor(i, j)));
-    //   }
-    //   printf("\n");
-    // }
 
     printf("B:\n");
     print_tensor(h_B_tensor);print("\n");
-    // for (int i = 0; i < size<0>(h_B_tensor); ++i) {
-    //   for (int j = 0; j < size<1>(h_B_tensor); ++j) {
-    //     printf("%6.3f ", static_cast<float>(h_B_tensor(i, j)));
-    //   }
-    //   printf("\n");
-    // }
   }
   #endif // DEBUG
 

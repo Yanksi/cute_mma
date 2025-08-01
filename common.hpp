@@ -12,3 +12,4 @@
             throw std::runtime_error("CUDA call failed with status " + std::to_string(status)); \
         }                                                                                       \
     } while (0)
+

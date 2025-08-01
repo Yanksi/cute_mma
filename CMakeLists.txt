@@ -36,27 +36,38 @@ set(COMMON_INCLUDE_DIRS
     ${ARGPARSE_INCLUDE_DIRS}
 )
 
-add_executable(playground cute_playground.cu)
-target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
+if (DEFINED AUTOTUNE AND AUTOTUNE)
+    file(GLOB CONFIG_DIRS "autotune_configs/*")
+    add_custom_target(autotune)
+    foreach(CONFIG_DIR ${CONFIG_DIRS})
+        get_filename_component(CONFIG_NAME ${CONFIG_DIR} NAME)
+        set(TARGET_NAME "autotune_${CONFIG_NAME}")
+        add_executable(${TARGET_NAME} cute_oft_pc.cu cute_oft_coop_pc.cu)
+        target_include_directories(${TARGET_NAME} PRIVATE ${CONFIG_DIR} ${COMMON_INCLUDE_DIRS})
+        set_target_properties(${TARGET_NAME} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/autotune)
+        add_dependencies(autotune ${TARGET_NAME})
+    endforeach()
+else()
+    add_executable(playground cute_playground.cu)
+    target_include_directories(playground PRIVATE ${COMMON_INCLUDE_DIRS})
 
-add_executable(cute_oft_pc cute_oft_pc.cu cute_oft_coop_pc.cu)
-target_include_directories(cute_oft_pc PRIVATE ${COMMON_INCLUDE_DIRS})
-target_link_libraries(cute_oft_pc PRIVATE CUDA::cublas OpenMP::OpenMP_CXX)
-target_compile_definitions(cute_oft_pc PRIVATE USE_CUBLAS)
-if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
-    target_compile_definitions(cute_oft_pc PRIVATE DEBUG)
+    add_executable(cute_oft_pc cute_oft_pc.cu cute_oft_coop_pc.cu)
+    target_include_directories(cute_oft_pc PRIVATE ${COMMON_INCLUDE_DIRS})
+    target_link_libraries(cute_oft_pc PRIVATE CUDA::cublas OpenMP::OpenMP_CXX)
+    target_compile_definitions(cute_oft_pc PRIVATE USE_CUBLAS)
+    if (${CMAKE_BUILD_TYPE} MATCHES "Debug")
+        target_compile_definitions(cute_oft_pc PRIVATE DEBUG)
+    endif()
+
+    # for each .cu file in folder "playgrounds", create an executable
+    file(GLOB PLAYGROUND_SOURCES "playgrounds/*.cu")
+    foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})
+        get_filename_component(PLAYGROUND_NAME ${PLAYGROUND_SOURCE} NAME_WE)
+        add_executable(${PLAYGROUND_NAME} ${PLAYGROUND_SOURCE})
+        target_include_directories(${PLAYGROUND_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
+        target_link_libraries(${PLAYGROUND_NAME} PRIVATE CUDA::cublas)
+    endforeach()
 endif()
-
-# for each .cu file in folder "playgrounds", create an executable
-file(GLOB PLAYGROUND_SOURCES "playgrounds/*.cu")
-foreach(PLAYGROUND_SOURCE ${PLAYGROUND_SOURCES})
-    get_filename_component(PLAYGROUND_NAME ${PLAYGROUND_SOURCE} NAME_WE)
-    add_executable(${PLAYGROUND_NAME} ${PLAYGROUND_SOURCE})
-    target_include_directories(${PLAYGROUND_NAME} PRIVATE ${COMMON_INCLUDE_DIRS})
-    target_link_libraries(${PLAYGROUND_NAME} PRIVATE CUDA::cublas)
-endforeach()
-
-
 # set(dtypes_o half float)
 # set(dtypes_r half float)
 
