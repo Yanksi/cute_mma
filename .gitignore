@@ -1,1 +1,4 @@
 build*
+media*
+autotune_configs/**/oft_config.hpp
+python

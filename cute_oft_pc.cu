@@ -108,6 +108,10 @@ int main(int argc, char** argv)
     .help("Random seed for the input matrices")
     .default_value(static_cast<int>(std::time(nullptr))) // Use current time as default seed
     .action([](const std::string& value) { return std::stoi(value); });
+  program.add_argument("--01init")
+    .help("Initialize input matrices with 0s and 1s instead of random floats")
+    .default_value(false)
+    .implicit_value(true);
   
   #ifdef DEBUG
   program.add_argument("--verbose")
@@ -123,10 +127,6 @@ int main(int argc, char** argv)
     .implicit_value(true);
   program.add_argument("--correctness_cpu")
     .help("Check correctness of the kernel against CPU reference implementation")
-    .default_value(false)
-    .implicit_value(true);
-  program.add_argument("--01init")
-    .help("Initialize input matrices with 0s and 1s instead of random floats")
     .default_value(false)
     .implicit_value(true);
   program.add_argument("--cublas_mode")
@@ -377,7 +377,7 @@ int main(int argc, char** argv)
   double time = timer.seconds() / timing_iterations;
   double theoretical_speedup = t_flops_AR_W_sparse / t_flops_AR_W;
   printf("Theoretical speedup: %.2f\n", theoretical_speedup);
-  printf("TFLOPS/s (AR_W): %.2f, (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
+  printf("TFLOPS/s (AR_W): [%.2f], (AR_W_sparse): %.2f, (A_RW): %.2f, Time: %.3f ms\n",
          t_flops_AR_W / time, t_flops_AR_W_sparse / time, t_flops_A_RW / time, time * 1000.0);
   return 0;
 }

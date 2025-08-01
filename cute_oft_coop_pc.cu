@@ -82,7 +82,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     CUTE_STATIC_ASSERT_V(size<0>(sR_warp_atom) == size<1>(sAR_warp_atom));
 
     
-    using mma_atom1 = MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>;
+    using mma_atom1 = std::conditional_t<(reconn_sz < 16), MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>, MMA_Atom<SM80_16x8x16_F16F16F16F16_TN>>;
 
     TiledMMA single_warp_mma1 = make_tiled_mma(
         mma_atom1{},
@@ -100,7 +100,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     Tensor tCrAR = thr_mma1.make_fragment_C(tCsAR(_,_,_,_0{})); // (MMA, MMA_M, MMA_N)
 
     using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
-    using s2r_atom_R = Copy_Atom<SM75_U32x1_LDSM_N, half_t>;
+    using s2r_atom_R = std::conditional_t<(reconn_sz < 16), Copy_Atom<SM75_U32x1_LDSM_N, half_t>, Copy_Atom<SM75_U32x4_LDSM_N, half_t>>;
 
     TiledCopy s2r_copy_a = make_tiled_copy_A(s2r_atom_A{}, single_warp_mma1);
     ThrCopy s2r_thr_copy_a = s2r_copy_a.get_slice(lane_idx);
@@ -253,7 +253,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         ) // (8, REST_M, TILE_N)
     );  // (WARP_M_REGION, TILE_N)
 
-    using mma_atom2 = MMA_Atom<SM80_16x8x8_F32F16F16F32_TN>;
+    using mma_atom2 = std::conditional_t<(reconn_sz < 16), MMA_Atom<SM80_16x8x8_F32F16F16F32_TN>, MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>>;
     TiledMMA single_warp_mma2 = make_tiled_mma(
         mma_atom2{},
         make_layout(make_shape(_1{}, _1{})),
