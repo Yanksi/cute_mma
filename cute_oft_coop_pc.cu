@@ -1,5 +1,5 @@
 #include "cute_oft_coop_pc.hpp"
-#include "oft_config.hpp"
+#include <oft_config.hpp>
 #include "cute_oft_util.hpp"
 #include "z_curve.hpp"
 
