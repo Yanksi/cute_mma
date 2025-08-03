@@ -34,8 +34,7 @@ class ConfigParams:
 class ConfigFile:
     file_header = inspect.cleandoc("""
     #pragma once
-    #include <common.hpp>
-    #include <cute/layout.hpp>
+    #include <cute/tensor.hpp>
     namespace cute {{
     {configs}
     }}

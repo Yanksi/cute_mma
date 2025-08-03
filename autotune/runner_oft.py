@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "numpy",
+#     "tqdm",
+# ]
+# ///
+
 import os
 import subprocess
 import re
@@ -14,6 +22,7 @@ async def run_command_and_postprocessing(command, postprocess=lambda out, err: o
     async with semaphore:
         gpu = avai_gpus.pop()
         command = f"CUDA_VISIBLE_DEVICES={gpu} {command}"
+        tqdm.write(command)
         process = await asyncio.create_subprocess_shell(command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await process.communicate()
         avai_gpus.append(gpu)
@@ -35,30 +44,31 @@ def get_executables(root_path):
             executables.append(path)
     return executables
 
-async def main(save_raw=False):
-    results = {}
-    if os.path.exists("results.pkl"):
-        with open("results.pkl", "rb") as f:
-            results = pickle.load(f)
+async def main(n_gpus = 1, iters = 100, results = None):
+    if results is None:
+        if os.path.exists("results.pkl"):
+            with open("results.pkl", "rb") as f:
+                results = pickle.load(f)
+        else:
+            results = {}
 
-    n_gpus = 4
     gpu_ids = list(range(n_gpus))
     semaphore = asyncio.Semaphore(n_gpus)
     tasks = []
-    executable_root = pathlib.Path(f"build_autotune/")
+    executable_root = pathlib.Path(f"build_autotune/autotune")
     list_executables = get_executables(executable_root)
     for i, executable in enumerate(list_executables):
         curr_name = executable.name
         if curr_name in results:
             continue
-        command = " ".join([str(executable), "-m 8192", "-n 8192", "-k 4096"])
+        command = " ".join([str(executable), "-m 8192", "-n 8192", "-k 8192", f"-t {iters}"])
         task = asyncio.create_task(run_command_and_postprocessing(command, postprocess=get_flops, semaphore=semaphore, avai_gpus=gpu_ids))
-        tasks.append((task, curr_result, curr_name, layout))
+        tasks.append((task, curr_name))
 
     with tqdm(total=len(tasks)) as pbar:
-        for i, (task, curr_result, curr_name, layout) in enumerate(tasks):
+        for i, (task, curr_name) in enumerate(tasks):
             result = await task
-            curr_result.setdefault(curr_name, {})[layout] = result
+            results[curr_name] = result
             pbar.update(1)
             if (i % 10) == 0:
                 with open("results.pkl", "wb") as f:
@@ -66,12 +76,20 @@ async def main(save_raw=False):
     
     with open("results.pkl", "wb") as f:
         pickle.dump(results, f)
+    return results
 
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
-    argparser.add_argument("--dtype", type=str, default="half_half")
-    argparser.add_argument("--layout", type=str, default="TN")
+    argparser.add_argument("--ngpus", type=int, default=1)
+    argparser.add_argument("--iter", type=int, default=100)
+    argparser.add_argument("-rt", "--rerun_threshold", type=float, default=50.0)
     args = argparser.parse_args()
-    target_dtype = args.dtype
-    target_layout = args.layout
-    asyncio.run(main(target_dtype, target_layout))
+    n_gpus = args.ngpus
+    iters = args.iter
+    threshold = args.rerun_threshold
+    results = asyncio.run(main(n_gpus = n_gpus, iters=iters))
+    all_results_k = list(results.keys())
+    for k in all_results_k:
+        if results[k][0] > threshold:
+            del results[k]
+    asyncio.run(main(n_gpus = n_gpus, iters=100, results=results))
