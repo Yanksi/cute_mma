@@ -1,9 +1,17 @@
 #pragma once
 #include <cute/tensor.hpp>
 
+#ifndef OFT_GROUP_SIZE
+#define OFT_GROUP_SIZE 256
+#endif
+
+#ifndef OFT_RECONN_SIZE
+#define OFT_RECONN_SIZE 8
+#endif
+
 struct CurrKernelParams {
-    static const unsigned int group_size = 256;
-    static const unsigned int reconn_sz = 8;
+    static const unsigned int group_size = OFT_GROUP_SIZE;
+    static const unsigned int reconn_sz = OFT_RECONN_SIZE;
 };
 
 template <class KernelParams>
