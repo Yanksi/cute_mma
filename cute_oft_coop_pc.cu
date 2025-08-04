@@ -101,6 +101,7 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
 
     using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
     using s2r_atom_R = std::conditional_t<(reconn_sz < 16), Copy_Atom<SM75_U32x1_LDSM_N, half_t>, Copy_Atom<SM75_U32x4_LDSM_N, half_t>>;
+    using r2s_atom_AR = Copy_Atom<UniversalCopy<uint32_t>, half_t>;
 
     TiledCopy s2r_copy_a = make_tiled_copy_A(s2r_atom_A{}, single_warp_mma1);
     ThrCopy s2r_thr_copy_a = s2r_copy_a.get_slice(lane_idx);
@@ -111,6 +112,11 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
     ThrCopy s2r_thr_copy_r = s2r_copy_r.get_slice(lane_idx);
     Tensor tXsR = s2r_thr_copy_r.partition_S(sR_warp_atom); // (CPY, CPY_N, CPY_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tXrR = s2r_thr_copy_r.retile_D(tCrR); // (CPY, CPY_N, CPY_K)
+
+    TiledCopy r2s_copy_ar = make_tiled_copy_C(r2s_atom_AR{}, single_warp_mma1);
+    ThrCopy r2s_thr_copy_ar = r2s_copy_ar.get_slice(lane_idx);
+    Tensor tXrAR = r2s_thr_copy_ar.retile_S(tCrAR); // (CPY, CPY_M, CPY_N)
+    Tensor tXsAR = r2s_thr_copy_ar.partition_D(sAR_warp_atom); // (CPY, CPY_M, CPY_N, PIPELINE)
 
     int smem_pipe_read = 0;
     auto K_PIPE_MAX = size<3>(tAsA);
@@ -164,7 +170,8 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
             asm volatile("bar.sync %0, %1;\n"
                                 :
                                 : "r"(ar_pipe_write + K_PIPE2_MAX), "n"(n_threads_total)); // wait for the previous data to be consumed
-            copy(AutoVectorizingCopyWithAssumedAlignment<32>{}, tCrAR, tCsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
+            // copy(r2s_atom_AR{}, tCrAR, tCsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
+            copy(r2s_atom_AR{}, tXrAR, tXsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
             asm volatile("bar.arrive %0, %1;\n"
                                 :
                                 : "r"(ar_pipe_write), "n"(n_threads_total)); // signal that the data is ready
