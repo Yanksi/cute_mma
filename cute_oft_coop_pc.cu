@@ -170,7 +170,6 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
             asm volatile("bar.sync %0, %1;\n"
                                 :
                                 : "r"(ar_pipe_write + K_PIPE2_MAX), "n"(n_threads_total)); // wait for the previous data to be consumed
-            // copy(r2s_atom_AR{}, tCrAR, tCsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
             copy(r2s_atom_AR{}, tXrAR, tXsAR(_,_,_,ar_pipe_write)); // copy the intermediate result into shared memory
             asm volatile("bar.arrive %0, %1;\n"
                                 :
@@ -260,7 +259,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         ) // (8, REST_M, TILE_N)
     );  // (WARP_M_REGION, TILE_N)
 
-    using mma_atom2 = std::conditional_t<(reconn_sz < 16), MMA_Atom<SM80_16x8x8_F32F16F16F32_TN>, MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>>;
+    using mma_atom2 = std::conditional_t<(reconn_sz < 16), MMA_Atom<SM80_16x8x8_F16F16F16F16_TN>, MMA_Atom<SM80_16x8x16_F16F16F16F16_TN>>;
     TiledMMA single_warp_mma2 = make_tiled_mma(
         mma_atom2{},
         make_layout(make_shape(_1{}, _1{})),
@@ -279,6 +278,7 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
 
     using s2r_atom_AR = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
     using s2r_atom_B = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
+    using r2g_atom_C = Copy_Atom<UniversalCopy<uint32_t>, half_t>;
 
     TiledCopy s2r_copy_ar = make_tiled_copy_A(s2r_atom_AR{}, single_warp_mma2);
     ThrCopy s2r_thr_copy_ar = s2r_copy_ar.get_slice(lane_idx);
@@ -289,6 +289,11 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
     ThrCopy s2r_thr_copy_b = s2r_copy_b.get_slice(lane_idx);
     Tensor tXsB = s2r_thr_copy_b.partition_S(sB_warp_atom); // (CPY, CPY_N, CPY_K, BLOCKS_ALONG_K, PIPELINE)
     Tensor tXrB = s2r_thr_copy_b.retile_D(tCrB); // (CPY, CPY_N, CPY_K)
+
+    TiledCopy r2g_copy_C = make_tiled_copy_C(r2g_atom_C{}, single_warp_mma2);
+    ThrCopy r2g_thr_copy_C = r2g_copy_C.get_slice(lane_idx);
+    Tensor tXrC = r2g_thr_copy_C.retile_S(tCrC); // (CPY, CPY_M, CPY_N)
+    Tensor tXgC = r2g_thr_copy_C.partition_D(gC_warp); // (CPY, CPY_M, CPY_N)
 
     int smem_pipe_read = 0;
     auto K_PIPE_MAX = size<3>(tBsB);
@@ -350,7 +355,9 @@ void oft_arb(TensorGB const &gB, TensorSB &sB, TiledCopyB copy_b,
         ++smem_pipe_read;
         smem_pipe_read = (smem_pipe_read == K_PIPE_MAX) ? 0 : smem_pipe_read;
     }
-    copy(tCrC, tCgC); // Copy the final result to gC
+    // copy(tCrC, tCgC); // Copy the final result to gC
+    
+    copy(r2g_atom_C{}, tXrC, tXgC); // Copy the final result to gC
 }
 
 template <class GridShape, class CtaTiler,
