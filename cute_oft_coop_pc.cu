@@ -405,7 +405,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
             reconn_sz * cta_n_groups,
             pipeline2
         )
-    ), make_tuple(_1{}, _1{})); // (BLK_M, RECONN_SZ)
+    ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, RECONN_SZ)
 
     auto sB_layout = coalesce(tile_to_shape(
         smem_atom,
