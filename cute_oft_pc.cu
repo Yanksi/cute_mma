@@ -196,7 +196,7 @@ int main(int argc, char** argv)
   {
     // Each thread gets its own random number generator seeded differently
     std::mt19937 generator(random_seed + omp_get_thread_num());
-    std::uniform_real_distribution<double> distribution(0.0, 1.0);
+    std::normal_distribution<double> distribution(0.0, 1.0);
     #pragma omp for
     for (int i = 0; i < h_A.size(); ++i) {
       if (zo_init) {
@@ -204,7 +204,7 @@ int main(int argc, char** argv)
         h_A[i] = static_cast<half>(static_cast<int>(distribution(generator) * 2));
       } else {
         // Initialize with random floats in the range [0, 1]
-        h_A[i] = static_cast<half>(distribution(generator));
+        h_A[i] = static_cast<half>(distribution(generator)); // scale to [-1, 1]
       }
     }
 
@@ -215,7 +215,7 @@ int main(int argc, char** argv)
         h_B[i] = static_cast<half>(static_cast<int>(distribution(generator) * 2));
       } else {
         // Initialize with random floats in the range [0, 1]
-        h_B[i] = static_cast<half>(distribution(generator));
+        h_B[i] = static_cast<half>(distribution(generator) / sqrt(k)); // scale to [-1, 1]
       }
     }
 
@@ -295,6 +295,7 @@ int main(int argc, char** argv)
     thrust::fill(thrust::device, d_C.begin(), d_C.end(), static_cast<half>(-1.0f));
     test_func(); // run the oft kernel
     thrust::host_vector<half> h_C_result = d_C;
+    // h_C_result[0] = static_cast<half>(-1.0f); // set the first element to -1.0f to avoid false positives in correctness check
 
     // compute the two versions of reference results using cublas
     printf("Checking against AR_W reference result...\n");

@@ -3,15 +3,15 @@
 #include "cute_oft_util.hpp"
 #include "z_curve.hpp"
 
-template<class CTATiler, class GroupSize, class ReconnectSize, class Pipeline1, class Pipeline2>
-size_t get_smem_size(CTATiler cta, GroupSize group_size, ReconnectSize reconn_sz, Pipeline1 pipe1, Pipeline2 pipe2)
+template<class CTATiler, class GroupSize, class ReconnectSize, class ConsumptionWidth, class PipelineA_R, class PipelineAR, class PipelineB>
+size_t get_smem_size(CTATiler cta, GroupSize group_size, ReconnectSize reconn_sz, ConsumptionWidth c_width, PipelineA_R pipeA_R, PipelineAR pipeAR, PipelineB pipeB)
 {
     using namespace cute;
-    auto size_A = size<0>(cta) * size<2>(cta) * pipe1; // BLK_M * BLK_K * PIPE2
-    auto size_B = size<1>(cta) * size<2>(cta) * pipe1; // BLK_N * BLK_K * PIPE2
+    auto size_A = size<0>(cta) * size<2>(cta) * pipeA_R; // BLK_M * BLK_K * PIPE2
+    auto size_B = size<1>(cta) * size<2>(cta) * pipeB; // BLK_N * BLK_K * PIPE2
     auto n_groups = max(size<1>(cta) / group_size, _1{}); // Number of groups in N dimension
-    auto size_R = n_groups * reconn_sz * size<2>(cta) * pipe1; // N_GROUPS * RECONN_SZ * BLK_K * PIPE2
-    auto size_AR = n_groups * reconn_sz * size<0>(cta) * pipe2; // N_GROUPS * RECONN_SZ * BLK_M * PIPE1
+    auto size_R = n_groups * reconn_sz * size<2>(cta) * pipeA_R; // N_GROUPS * RECONN_SZ * BLK_K * PIPE2
+    auto size_AR = n_groups * c_width * size<0>(cta) * pipeAR; // N_GROUPS * CONSUMPTION_WIDTH * BLK_M * PIPE1
     // Compute shared memory size based on the tiler and other parameters
     return (size_A + size_B + size_R + size_AR) * sizeof(half);
 }
@@ -108,17 +108,22 @@ void oft_ar(TensorGA const &gA, TensorSA &sA, TiledCopyA copy_a,
 
     using s2r_atom_A = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
     using r2s_atom_AR = Copy_Atom<UniversalCopy<uint32_t>, half_t>;
-    auto base_n_blocks = std::conditional_t<(reconn_sz < 16), _1, _4>{};
-    auto total_R_blocks = base_n_blocks * c_blocks * n_groups;
-    CUTE_STATIC_ASSERT(has_single_bit(total_R_blocks)); // Ensure total_R_blocks is a power of 2
+    // auto base_n_blocks = std::conditional_t<(reconn_sz < 16), _1, _4>{};
+    // auto total_R_blocks = base_n_blocks * c_blocks * n_groups;
+    // CUTE_STATIC_ASSERT(has_single_bit(total_R_blocks)); // Ensure total_R_blocks is a power of 2
+    // using s2r_atom_R = std::conditional_t<
+    //                         (total_R_blocks == 1),
+    //                         Copy_Atom<SM75_U32x1_LDSM_N, half_t>,
+    //                         std::conditional_t<
+    //                             (total_R_blocks == 2),
+    //                             Copy_Atom<SM75_U32x2_LDSM_N, half_t>,
+    //                             Copy_Atom<SM75_U32x4_LDSM_N, half_t>
+    //                         >
+    //                     >;
     using s2r_atom_R = std::conditional_t<
-                            (total_R_blocks == 1),
+                            (reconn_sz < 16),
                             Copy_Atom<SM75_U32x1_LDSM_N, half_t>,
-                            std::conditional_t<
-                                (total_R_blocks == 2),
-                                Copy_Atom<SM75_U32x2_LDSM_N, half_t>,
-                                Copy_Atom<SM75_U32x4_LDSM_N, half_t>
-                            >
+                            Copy_Atom<SM75_U32x4_LDSM_N, half_t>
                         >;
 
     TiledCopy s2r_copy_a = make_tiled_copy_A(s2r_atom_A{}, single_warp_mma1);
@@ -383,13 +388,15 @@ template <class GridShape, class CtaTiler,
           class ALayout, class TiledCopyA,
           class RLayout, class TiledCopyR, class GroupSize, class ReconnectSize, class ConsumptionWidth,
           class BLayout, class TiledCopyB,
-          class CLayout, class WarpLayoutStage1, class WarpLayoutStage2, class Pipeline1, class Pipeline2>
+          class CLayout, class WarpLayoutStage1, class WarpLayoutStage2,
+          class PipelineA_R, class PipelineAR, class PipelineB>
 __global__ static __launch_bounds__(decltype((size(WarpLayoutStage1{}) + size(WarpLayoutStage2{})) * cute::_32{})::value)
 void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
                 half const *A, ALayout layout_a, TiledCopyA copy_a,
                 half const *R, RLayout layout_r, TiledCopyR copy_r, GroupSize group_sz, ReconnectSize reconn_sz, ConsumptionWidth c_width,
                 half const *B, BLayout layout_b, TiledCopyB copy_b,
-                half       *C, CLayout layout_c, WarpLayoutStage1 warp_layout_stage1, WarpLayoutStage2 warp_layout_stage2, Pipeline1 pipeline1, Pipeline2 pipeline2)
+                half       *C, CLayout layout_c, WarpLayoutStage1 warp_layout_stage1, WarpLayoutStage2 warp_layout_stage2,
+                PipelineA_R pipeline_a_r, PipelineAR pipeline_ar, PipelineB pipeline_b)
 {
     using namespace cute;
 
@@ -400,7 +407,7 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
     // CUTE_STATIC_ASSERT_V(reconn_sz == _8{}); // Assume the reconnection size is 8, which is the size of the atom
 
     CUTE_STATIC_ASSERT_V(size<1>(cta_tiler) % group_sz == _0{} || group_sz % size<1>(cta_tiler) == _0{}); // Ensure the N dimension of the CTA tiler is divisible by group_sz
-    CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % reconn_sz == _0{}); // Ensure the K dimension of the CTA tiler is divisible by reconn_sz
+    CUTE_STATIC_ASSERT_V(size<2>(cta_tiler) % c_width == _0{}); // Ensure the K dimension of the CTA tiler is divisible by c_width
     auto cta_n_groups = max(size<1>(cta_tiler) / group_sz, _1{}); // Number of groups in N dimension
 
     auto smem_atom = get_smem_atom(size<2>(cta_tiler));
@@ -411,30 +418,30 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             size<0>(cta_tiler), // BLK_M
             size<2>(cta_tiler), // BLK_K
-            pipeline1           // PIPE
+            pipeline_a_r           // PIPE
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, BLK_K, PIPE)
 
     auto n_consume_blocks = c_width / reconn_sz;
     CUTE_STATIC_ASSERT_V(n_consume_blocks >= _1{}); // Ensure the number of consume blocks is at least 1
     CUTE_STATIC_ASSERT_V(c_width % reconn_sz == _0{}); // Ensure the consumption width is divisible by the reconnection size
-    auto ar_smem_atom = get_smem_atom<false>(reconn_sz * cta_n_groups * n_consume_blocks);
+    auto ar_smem_atom = get_smem_atom<false>(c_width * cta_n_groups);
     // for storing the intermediate result of AR
     auto sAR_layout = coalesce(tile_to_shape(
         ar_smem_atom,
         make_shape(
             size<0>(cta_tiler), // BLK_M
-            reconn_sz * cta_n_groups * n_consume_blocks,
-            pipeline2
+            c_width * cta_n_groups,
+            pipeline_ar           // PIPE
         )
-    ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, RECONN_SZ * N_GROUPS, PIPE)
+    ), make_tuple(_1{}, _1{}, _1{})); // (BLK_M, CONSUME_WIDTH * N_GROUPS, PIPE)
 
     auto sB_layout = coalesce(tile_to_shape(
         smem_atom,
         make_shape(
             size<1>(cta_tiler), // BLK_N
             size<2>(cta_tiler), // BLK_K
-            pipeline1           // PIPE
+            pipeline_b           // PIPE
         )
     ), make_tuple(_1{}, _1{}, _1{})); // (BLK_N, BLK_K, PIPE)
 
@@ -443,9 +450,9 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         make_shape(
             cta_n_groups * reconn_sz,
             size<2>(cta_tiler),
-            pipeline1
+            pipeline_a_r
             )
-        ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, K, PIPE)
+        ), make_tuple(_1{}, _1{}, _1{})); // (N_GROUPS * R, BLK_K, PIPE)
 
     // Shared memory buffers
     extern __shared__ half smem[]; // Shared memory buffer
@@ -480,21 +487,21 @@ void oft_device(GridShape grid_shape, CtaTiler cta_tiler,
         ), make_coord(get<1>(cta_coord) * ratio(size<1>(cta_tiler), max(size<1>(cta_tiler), group_sz)), _)); // (N_GROUPS * R, BLK_K, k)， assuming one thread block would handle at least one group of R
     
     int thread_idx = threadIdx.x;
-    int stage1_threads = size(warp_layout_stage1) * 32;
-    if (thread_idx < stage1_threads) {
-        // Call the AR kernel
-        oft_ar(
-            gA, sA, copy_a,
-            gR, sR, copy_r, reconn_sz,
-            sAR, thread_idx,
-            warp_layout_stage1, warp_layout_stage2
-        );
-    } else {
+    int stage2_threads = size(warp_layout_stage2) * 32;
+    if (thread_idx < stage2_threads) {
         // Call the ARB kernel
         oft_arb(
             gB, sB, copy_b,
-            sAR, group_sz, reconn_sz,
-            gC, thread_idx - stage1_threads,
+            sAR, group_sz, c_width,
+            gC, thread_idx,
+            warp_layout_stage1, warp_layout_stage2
+        );
+    } else {
+        // Call the AR kernel
+        oft_ar(
+            gA, sA, copy_a,
+            gR, sR, copy_r, reconn_sz, n_consume_blocks,
+            sAR, thread_idx - stage2_threads,
             warp_layout_stage1, warp_layout_stage2
         );
     }
@@ -532,70 +539,74 @@ void oft_tn(int m, int n, int k,
         half      * C, int ldC,
         cudaStream_t stream)
 {
-  using namespace cute;
-  using CompParams = CurrCompParams;
+    using namespace cute;
+    using CompParams = CurrCompParams;
 
-  // Define shapes (dynamic)
-  auto M = int(m);
-  auto N = int(n);
-  auto K = int(k);
-  auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
+    // Define shapes (dynamic)
+    auto M = int(m);
+    auto N = int(n);
+    auto K = int(k);
+    auto prob_shape = make_shape(M, N, K);                     // (M, N, K)
 
-  // Define CTA tile sizes (static)
-  auto group_size = Int<KernelParams::group_size>{};
-  auto reconn_sz = Int<KernelParams::reconn_sz>{};
-  auto bM = Int<CompParams::bM>{};
-  auto bN = Int<CompParams::bN>{};
-  auto bK = Int<CompParams::bK>{};
-  auto bN_group = max(bN / group_size, _1{});
-  auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
-  auto bP1 = Int<CompParams::bP1>{};  // Pipeline1
-  auto bP2 = Int<CompParams::bP2>{};  // Pipeline2
-  int n_groups = N / group_size;
-  auto warp_layout1 = typename CompParams::warp_layout1{};
-  auto warp_layout2 = typename CompParams::warp_layout2{};
+    // Define CTA tile sizes (static)
+    auto group_size = Int<KernelParams::group_size>{};
+    auto reconn_sz = Int<KernelParams::reconn_sz>{};
+    auto bM = Int<CompParams::bM>{};
+    auto bN = Int<CompParams::bN>{};
+    auto bK = Int<CompParams::bK>{};
+    auto c_width = Int<CompParams::c_width>{};
+    auto bN_group = max(bN / group_size, _1{});
+    auto cta_tiler = make_shape(bM, bN, bK);                   // (CTA_M, CTA_N, CTA_K)
+    auto bP_a_r = Int<CompParams::bP_a_r>{};  // Pipeline for A and R
+    auto bP_ar = Int<CompParams::bP_ar>{};  // Pipeline for AR
+    auto bP_b = Int<CompParams::bP_b>{};  // Pipeline for B
+    int n_groups = N / group_size;
+    auto warp_layout1 = typename CompParams::warp_layout1{};
+    auto warp_layout2 = typename CompParams::warp_layout2{};
 
-  // Define the gmem layouts
-  auto A_layout = make_layout(
-    make_shape(M, K),
-    make_stride(ldA, Int<1>{})
-  );
+    // Define the gmem layouts
+    auto A_layout = make_layout(
+        make_shape(M, K),
+        make_stride(ldA, Int<1>{})
+    );
 
-  auto B_layout = make_layout(
-    make_shape(N, K),
-    make_stride(ldB, Int<1>{})
-  );
- 
-  auto R_layout = make_layout(
-    make_shape(n_groups * reconn_sz, K),
-    make_stride(ldR, Int<1>{})
-  );
+    auto B_layout = make_layout(
+        make_shape(N, K),
+        make_stride(ldB, Int<1>{})
+    );
 
-  auto C_layout = make_layout(
-    make_shape(M, N),
-    make_stride(ldC, Int<1>{})
-  );
+    auto R_layout = make_layout(
+        make_shape(n_groups * reconn_sz, K),
+        make_stride(ldR, Int<1>{})
+    );
 
-  TiledCopy copyA = cp_layout<uint128_t, half>(bM, bK, size(warp_layout1) * _32{});
-  TiledCopy copyR = cp_layout<uint128_t, half>(bN_group * reconn_sz, bK, size(warp_layout1) * _32{});
-  TiledCopy copyB = cp_layout<uint128_t, half>(bN, bK, size(warp_layout2) * _32{});
+    auto C_layout = make_layout(
+        make_shape(M, N),
+        make_stride(ldC, Int<1>{})
+    );
 
-  dim3 dimBlock((size(warp_layout1) + size(warp_layout2)) * _32{});
-  auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
-  dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
+    TiledCopy copyA = cp_layout<uint128_t, half>(bM, bK, size(warp_layout1) * _32{});
+    TiledCopy copyR = cp_layout<uint128_t, half>(bN_group * reconn_sz, bK, size(warp_layout1) * _32{});
+    TiledCopy copyB = cp_layout<uint128_t, half>(bN, bK, size(warp_layout2) * _32{});
 
-  uint32_t smem_size = get_smem_size(cta_tiler, group_size, reconn_sz, bP1, bP2);
+    dim3 dimBlock((size(warp_layout1) + size(warp_layout2)) * _32{});
+    auto grid_shape = make_shape(size(ceil_div(M, bM)), size(ceil_div(N, bN)));
+    dim3 dimGrid(get<0>(grid_shape) * get<1>(grid_shape));
 
-  #ifdef DEBUG
-  printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
-         dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
-  #endif
-  oft_device<<<dimGrid, dimBlock, smem_size, stream>>>
-      (grid_shape, cta_tiler,
-       A, A_layout, copyA,
-       R, R_layout, copyR, group_size, reconn_sz,
-       B, B_layout, copyB,
-       C, C_layout, warp_layout1, warp_layout2, bP1, bP2);
+    uint32_t smem_size = get_smem_size(cta_tiler, group_size, reconn_sz, c_width, bP_a_r, bP_ar, bP_b);
+
+    #ifdef DEBUG
+    printf("dimGrid: (%d, %d), dimBlock: (%d, %d)\n",
+            dimGrid.x, dimGrid.y, dimBlock.x, dimBlock.y);
+    #endif
+    oft_device<<<dimGrid, dimBlock, smem_size, stream>>>(
+        grid_shape, cta_tiler,
+        A, A_layout, copyA,
+        R, R_layout, copyR, group_size, reconn_sz, c_width,
+        B, B_layout, copyB,
+        C, C_layout, warp_layout1, warp_layout2,
+        bP_a_r, bP_ar, bP_b
+    );
 }
 
 template void oft_tn<CurrKernelParams>(int m, int n, int k,
